@@ -26,7 +26,7 @@ info()  { echo -e "${GREEN}[+]${NC} $*"; }
 warn()  { echo -e "${RED}[!]${NC} $*"; }
 
 PROJECT_DIR="$HOME/ASNIPtest"
-REPO_URL="https://github.com/e13815332/ASNIPtest.git"
+REPO_URL="https://github.com/cpddli/ASNIPtest.git"
 
 # ── 卸载 ──
 do_uninstall() {
