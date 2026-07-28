@@ -25,7 +25,7 @@
 
 **Linux / macOS**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/cpddli/ASNIPtest/main/install.sh | bash
+curl -fsSL https://github.250887.xyz/https://raw.githubusercontent.com/cpddli/ASNIPtest/main/install.sh | bash
 ```
 
 **Windows**（需先装 WSL2）
@@ -34,7 +34,7 @@ curl -fsSL https://raw.githubusercontent.com/cpddli/ASNIPtest/main/install.sh | 
 wsl --install
 
 # 重启后进 Ubuntu 终端
-curl -fsSL https://raw.githubusercontent.com/cpddli/ASNIPtest/main/install.sh | bash
+curl -fsSL https://github.250887.xyz/https://raw.githubusercontent.com/cpddli/ASNIPtest/main/install.sh | bash
 ```
 
 ---
@@ -46,7 +46,7 @@ curl -fsSL https://raw.githubusercontent.com/cpddli/ASNIPtest/main/install.sh | 
 一条命令安装所有依赖（masscan、prips）并注册全局命令：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/cpddli/ASNIPtest/main/install.sh | bash
+curl -fsSL https://github.250887.xyz/https://raw.githubusercontent.com/cpddli/ASNIPtest/main/install.sh | bash
 ```
 
 安装完成后，在任意目录输入 `cmtjd` 即可启动。
@@ -72,7 +72,7 @@ wsl --install
 重启后开始菜单会多一个「Ubuntu」应用，打开它，输入：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/cpddli/ASNIPtest/main/install.sh | bash
+curl -fsSL https://github.250887.xyz/https://raw.githubusercontent.com/cpddli/ASNIPtest/main/install.sh | bash
 ```
 
 > WSL2 默认使用桥接模式，正式测试时需调整为 NAT 模式才能正常使用 masscan。
@@ -224,7 +224,7 @@ masscan 依赖 **raw socket**（CAP_NET_RAW），以下环境有限制：
 ## 卸载
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/cpddli/ASNIPtest/main/uninstall.sh | bash
+curl -fsSL https://github.250887.xyz/https://raw.githubusercontent.com/cpddli/ASNIPtest/main/uninstall.sh | bash
 ```
 
 这会删除 `cmtjd` 命令和 `~/ASNIPtest` 目录。
