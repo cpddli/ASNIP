@@ -193,12 +193,22 @@ def detect_isp():
         print(f"  (无法获取详情: {e})")
     return ip, "", ""
 
+# ── 1. 先获取 GLOBAL_COUNTRY 变量 ──
 GLOBAL_IP, GLOBAL_COUNTRY, GLOBAL_ISP = detect_isp()
 
-# 【修改处】将最高速率硬性封顶为 2000pps，保护家庭光猫/路由器
-if GLOBAL_COUNTRY in ("CN", "") and MASSCAN_RATE > 2000:
-    print(f"  ⚠ 为保护光猫/路由器性能，masscan 速率从 {MASSCAN_RATE}pps 限制为 2000pps")
-    MASSCAN_RATE = 2000
+# ── 2. 自适应硬件与参数配置 ──
+CPU_CORES, RAM_MB = detect_hardware()
+MASSCAN_RATE    = probe_masscan_rate()
+CF_SCANNER_CONC = 30
+API_CONCURRENT  = 4
+API_CHUNK       = 2000 if RAM_MB < 1024 else 5000
+
+# ── 3. 强制保障光猫不爆表（此时 GLOBAL_COUNTRY 已正确定义） ──
+if GLOBAL_COUNTRY in ("CN", "") and MASSCAN_RATE > 800:
+    print(f"  ⚠ 保护光猫连接表，masscan 速率限制为 800pps")
+    MASSCAN_RATE = 800
+
+print(f"  硬件: {CPU_CORES}核 {RAM_MB}MB → masscan {MASSCAN_RATE}pps cf-scanner {CF_SCANNER_CONC}c API {API_CONCURRENT}c")
 
 BASE       = Path(__file__).parent.resolve()
 CF_SCANNER = BASE / "cf-scanner"
