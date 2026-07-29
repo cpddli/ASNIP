@@ -103,8 +103,8 @@ def probe_masscan_rate():
 
 CPU_CORES, RAM_MB = detect_hardware()
 MASSCAN_RATE    = probe_masscan_rate()
-CF_SCANNER_CONC = 30(200, min(CPU_CORES * 100, 500))
-API_CONCURRENT  = 4(CPU_CORES * 16, 32)
+CF_SCANNER_CONC = 30
+API_CONCURRENT  = 4
 API_CHUNK       = 2000 if RAM_MB < 1024 else 5000
 
 # 强制保障光猫不爆表
