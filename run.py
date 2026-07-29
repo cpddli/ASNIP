@@ -40,8 +40,7 @@ def probe_masscan_rate():
                 iface = name
                 break
     if not iface:
-        cores = multiprocessing.cpu_count()
-        return max(1000, min(cores * 1000, 3000))
+        return 800
 
     cidrs = [a for a in sys.argv[1:] if not a.startswith("--") and "/" in a]
     if not cidrs:
@@ -51,7 +50,7 @@ def probe_masscan_rate():
     with open(tmp_cidr, "w") as f:
         f.write("\n".join(sample))
 
-    # 【修改处】降低初始与上限速率，防止测试瞬间打爆光猫 CPU
+    # 【光猫降压参数】限制测速上限，防止测试阶段挤爆连接表
     best_rate = 800
     test_rate = 500
     max_test = 1000
@@ -89,7 +88,7 @@ def probe_masscan_rate():
             best_rate = test_rate
             test_rate *= 2
         elif ratio >= 0.3:
-            best_rate = max(1000, int(actual_pps * 0.8))
+            best_rate = max(500, int(actual_pps * 0.8))
             break
         else:
             break
@@ -98,21 +97,8 @@ def probe_masscan_rate():
         os.remove(tmp_cidr)
     except Exception:
         pass
-    return min(best_rate, 2000)
+    return min(best_rate, 800)
 
-
-CPU_CORES, RAM_MB = detect_hardware()
-MASSCAN_RATE    = probe_masscan_rate()
-CF_SCANNER_CONC = 30
-API_CONCURRENT  = 4
-API_CHUNK       = 2000 if RAM_MB < 1024 else 5000
-
-# 强制保障光猫不爆表
-if GLOBAL_COUNTRY in ("CN", "") and MASSCAN_RATE > 800:
-    print(f"  ⚠ 保护光猫连接表，masscan 速率限制为 800pps")
-    MASSCAN_RATE = 800
-
-print(f"  硬件: {CPU_CORES}核 {RAM_MB}MB → masscan {MASSCAN_RATE}pps cf-scanner {CF_SCANNER_CONC}c API {API_CONCURRENT}c")
 
 # ── 获取公网 IP (NAT/Docker 环境兼容) ──
 def get_public_ip():
@@ -147,6 +133,7 @@ def get_public_ip():
 
     return "127.0.0.1"
 
+
 # ── 获取局域网 IP（下载链接用，不走出口 IP） ──
 def get_lan_ip():
     """获取本机局域网 IP，用于下载链接；家用宽带出口 IP 无法直连"""
@@ -160,6 +147,7 @@ def get_lan_ip():
     except Exception:
         pass
     return "127.0.0.1"
+
 
 # ── 公网 IP + 运营商检测 ──
 def detect_isp():
@@ -193,17 +181,18 @@ def detect_isp():
         print(f"  (无法获取详情: {e})")
     return ip, "", ""
 
-# ── 1. 先获取 GLOBAL_COUNTRY 变量 ──
+
+# ── 1. 先获取 GLOBAL_COUNTRY 变量（解决 NameError） ──
 GLOBAL_IP, GLOBAL_COUNTRY, GLOBAL_ISP = detect_isp()
 
-# ── 2. 自适应硬件与参数配置 ──
+# ── 2. 自适应硬件与光猫保护参数设置 ──
 CPU_CORES, RAM_MB = detect_hardware()
 MASSCAN_RATE    = probe_masscan_rate()
-CF_SCANNER_CONC = 30
-API_CONCURRENT  = 4
+CF_SCANNER_CONC = 30  # 锁定为 30 线程，防止并发高打爆光猫表项
+API_CONCURRENT  = 4   # 锁定为 4 线程
 API_CHUNK       = 2000 if RAM_MB < 1024 else 5000
 
-# ── 3. 强制保障光猫不爆表（此时 GLOBAL_COUNTRY 已正确定义） ──
+# ── 3. 强制限制 masscan 发包速率 ──
 if GLOBAL_COUNTRY in ("CN", "") and MASSCAN_RATE > 800:
     print(f"  ⚠ 保护光猫连接表，masscan 速率限制为 800pps")
     MASSCAN_RATE = 800
