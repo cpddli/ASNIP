@@ -193,9 +193,8 @@ API_CONCURRENT  = 4   # 锁定为 4 线程
 API_CHUNK       = 2000 if RAM_MB < 1024 else 5000
 
 # ── 3. 强制限制 masscan 发包速率 ──
-if GLOBAL_COUNTRY in ("CN", "") and MASSCAN_RATE > 800:
-    print(f"  ⚠ 保护光猫连接表，masscan 速率限制为 800pps")
-    MASSCAN_RATE = 800
+if GLOBAL_COUNTRY in ("CN", "") and MASSCAN_RATE > 2000:  # 改为 2000
+    MASSCAN_RATE = 2000
 
 print(f"  硬件: {CPU_CORES}核 {RAM_MB}MB → masscan {MASSCAN_RATE}pps cf-scanner {CF_SCANNER_CONC}c API {API_CONCURRENT}c")
 
