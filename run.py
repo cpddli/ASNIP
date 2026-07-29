@@ -41,7 +41,7 @@ def probe_masscan_rate():
                 break
     if not iface:
         cores = multiprocessing.cpu_count()
-        return max(1000, min(cores * 1000, 16000))
+        return max(1000, min(cores * 1000, 3000))
 
     cidrs = [a for a in sys.argv[1:] if not a.startswith("--") and "/" in a]
     if not cidrs:
@@ -51,10 +51,11 @@ def probe_masscan_rate():
     with open(tmp_cidr, "w") as f:
         f.write("\n".join(sample))
 
-    best_rate = 2000
+    # 【修改处】降低初始与上限速率，防止测试瞬间打爆光猫 CPU
+    best_rate = 1500
     test_rate = 1000
-    max_test = 200000
-    probe_sec = 8
+    max_test = 3000
+    probe_sec = 5
 
     while test_rate <= max_test:
         try:
@@ -88,7 +89,7 @@ def probe_masscan_rate():
             best_rate = test_rate
             test_rate *= 2
         elif ratio >= 0.3:
-            best_rate = max(2000, int(actual_pps * 0.8))
+            best_rate = max(1000, int(actual_pps * 0.8))
             break
         else:
             break
@@ -97,7 +98,7 @@ def probe_masscan_rate():
         os.remove(tmp_cidr)
     except Exception:
         pass
-    return best_rate
+    return min(best_rate, 2000)
 
 
 CPU_CORES, RAM_MB = detect_hardware()
@@ -111,7 +112,6 @@ print(f"  硬件: {CPU_CORES}核 {RAM_MB}MB → masscan {MASSCAN_RATE}pps cf-sca
 # ── 获取公网 IP (NAT/Docker 环境兼容) ──
 def get_public_ip():
     """获取公网出口 IP，HTTP API → DNS 多重兜底，局域网也能正确获取"""
-    # ── HTTP API（首选，速度快） ──
     apis = [
         ("https://api.ipify.org", 5),          # 国际
         ("https://api-ipv4.ip.sb/ip", 5),      # 国内可用
@@ -124,7 +124,6 @@ def get_public_ip():
         except Exception:
             continue
 
-    # ── DNS 方式（不依赖 HTTP，局域网 NAT 后也能正确获取公网出口 IP） ──
     dns_queries = [
         (["dig", "+short", "myip.opendns.com", "@resolver1.opendns.com"], 5),
         (["dig", "TXT", "+short", "o-o.myaddr.l.google.com", "@ns1.google.com"], 5),
@@ -191,19 +190,16 @@ def detect_isp():
 
 GLOBAL_IP, GLOBAL_COUNTRY, GLOBAL_ISP = detect_isp()
 
-# 国内运营商链路限速：网卡能发多少 ≠ 运营商能放多少
-# 家宽上行通常 20-50Mbps，但运营商会限速大量 raw SYN 包
-# 未知地区也保守限制，避免不慎打满运营商链路
-if GLOBAL_COUNTRY in ("CN", "") and MASSCAN_RATE > 8000:
-    print(f"  ⚠ 国内运营商链路，masscan 速率从 {MASSCAN_RATE}pps 降至 8000pps")
-    MASSCAN_RATE = 8000
+# 【修改处】将最高速率硬性封顶为 2000pps，保护家庭光猫/路由器
+if GLOBAL_COUNTRY in ("CN", "") and MASSCAN_RATE > 2000:
+    print(f"  ⚠ 为保护光猫/路由器性能，masscan 速率从 {MASSCAN_RATE}pps 限制为 2000pps")
+    MASSCAN_RATE = 2000
 
-BASE      = Path(__file__).parent.resolve()
+BASE       = Path(__file__).parent.resolve()
 CF_SCANNER = BASE / "cf-scanner"
 VERIFY_PY  = BASE / "verify.py"
 API_URL    = "https://api.090227.xyz/check"
 
-# 确保 cf-scanner 有执行权限 (git clone 不保留 +x)
 if CF_SCANNER.is_file():
     CF_SCANNER.chmod(0o755)
 
@@ -230,7 +226,6 @@ def fetch_prefixes(asns):
 
 # ── Step 2: CIDR → IP ──
 def expand_ips():
-    """Expand CIDR ranges to individual IPs (obsolete - masscan reads CIDRs directly)"""
     ip_file = BASE / "ips.txt"
     total = 0
     with open(ip_file, "w") as out:
@@ -253,7 +248,6 @@ with open(BASE / "ports.txt") as f:
 DEFAULT_PORTS = ",".join(_default_ports)
 
 def parse_ports(port_str):
-    """解析端口字符串: 443 或 8443-8550 或 443,8443,2053-2096"""
     ports = set()
     for part in port_str.split(','):
         part = part.strip()
@@ -273,6 +267,7 @@ def parse_ports(port_str):
         except ValueError:
             continue
     return ",".join(sorted(ports, key=int)) if ports else ""
+
 def run_masscan(ports_str=None):
     ports = ports_str if ports_str else DEFAULT_PORTS
     if not ports or ports == ",":
@@ -280,14 +275,12 @@ def run_masscan(ports_str=None):
     result_file = BASE / "masscan_result.txt"
     ip_file = BASE / "cidrs.txt"
 
-    # 清理上次残留（可能 root 所有，普通用户改不了 → sudo rm）
     if result_file.exists():
         if os.geteuid() == 0:
             result_file.unlink()
         else:
             subprocess.run(["sudo", "rm", "-f", str(result_file)], check=False)
 
-    # masscan 需要 root 权限
     sudo = [] if os.geteuid() == 0 else ["sudo"]
     cmd = sudo + [
         "masscan", "-iL", str(ip_file),
@@ -296,7 +289,6 @@ def run_masscan(ports_str=None):
         "-oL", str(result_file),
         "--wait", "5"
     ]
-    # 捕获 stderr 画进度条，不刷屏
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                             text=True, bufsize=1)
     bar_width = 30
@@ -326,13 +318,11 @@ def run_masscan(ports_str=None):
             print("  → 请换到 KVM VPS 或物理机运行")
         raise subprocess.CalledProcessError(proc.returncode, cmd)
 
-    # sudo 创建的文件归 root → chown 回当前用户
     if os.geteuid() != 0:
         uid = os.getuid()
         gid = os.getgid()
         subprocess.run(["sudo", "chown", f"{uid}:{gid}", str(result_file)], check=False)
 
-    # 转换为 IP:port (流式写入，不在内存全量加载)
     total = 0
     tmp_file = result_file.with_suffix(".tmp")
     with open(result_file) as src, open(tmp_file, "w") as dst:
@@ -359,7 +349,6 @@ def cf_scan():
     if not os.access(CF_SCANNER, os.X_OK):
         os.chmod(CF_SCANNER, 0o755)
 
-    # 捕获 stdout 解析进度画进度条
     proc = subprocess.Popen(
         [str(CF_SCANNER), "-i", str(new_file), "-o", str(hits_file), "-c", str(CF_SCANNER_CONC)],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
@@ -447,7 +436,6 @@ def speed_test():
                 continue
             ip, port = parts[0], parts[1]
 
-            # TCP 延迟
             latency = 0
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -459,7 +447,6 @@ def speed_test():
             except:
                 pass
 
-            # 下载速度 (通过 CF 节点下载 speed.cloudflare.com)，Mbps
             speed_mbps = 0
             if latency > 0:
                 try:
@@ -515,12 +502,9 @@ def output_csv(asns):
 
     print(f"\n  结果: {len(lines)} 条 → {output.name}")
 
-    # ── 提供下载链接（局域网 + 公网双链接） ──
     lan_ip = get_lan_ip()
     port = 8899
 
-    # 端口被占用 → 尝试释放或换端口
-    import socket
     def _port_free(p):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
@@ -583,7 +567,6 @@ if __name__ == "__main__":
         try:
             raw = input("  输入 ASN 编号 (多个用逗号分隔): ").strip()
         except (EOFError, KeyboardInterrupt):
-            # 管道模式, 尝试接管 /dev/tty
             try:
                 with open("/dev/tty") as tty:
                     os.dup2(tty.fileno(), 0)
@@ -597,14 +580,12 @@ if __name__ == "__main__":
             sys.exit(1)
         asns = [a.strip().replace("AS", "").replace("as", "") for a in raw.replace("，", ",").split(",") if a.strip()]
     else:
-        # 支持: python3 run.py AS3214,AS906 或 python3 run.py AS3214 AS906 [-p 端口]
         args = sys.argv[1:]
-        # 过滤 -p 及其参数
         i = 0
         asn_args = []
         while i < len(args):
             if args[i] == "-p":
-                i += 2  # 跳过 -p 和它的参数
+                i += 2
             else:
                 asn_args.append(args[i])
                 i += 1
@@ -616,7 +597,6 @@ if __name__ == "__main__":
             sys.exit(1)
     print(f"\n  ASN: {', '.join(f'AS{a}' for a in asns)}\n")
 
-    # ── 端口选择 ──
     scan_ports = DEFAULT_PORTS
     if len(sys.argv) < 2:
         print(f"  默认端口: {DEFAULT_PORTS}")
@@ -630,7 +610,6 @@ if __name__ == "__main__":
                 scan_ports = parsed
                 print(f"  扫描端口: {scan_ports}")
     else:
-        # 命令行模式支持 -p 参数
         for i, arg in enumerate(sys.argv[1:], 1):
             if arg == "-p" and i < len(sys.argv) - 1:
                 scan_ports = parse_ports(sys.argv[i+1])
@@ -644,7 +623,6 @@ if __name__ == "__main__":
         ("4/6 API精筛",   api_verify),
     ]
 
-    # 测速：让用户选择
     choice = ""
     try:
         choice = input("\n  是否测速？(y/n，默认跳过): ").strip().lower()
