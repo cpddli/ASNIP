@@ -52,9 +52,9 @@ def probe_masscan_rate():
         f.write("\n".join(sample))
 
     # 【修改处】降低初始与上限速率，防止测试瞬间打爆光猫 CPU
-    best_rate = 1500
-    test_rate = 1000
-    max_test = 3000
+    best_rate = 800
+    test_rate = 500
+    max_test = 1000
     probe_sec = 5
 
     while test_rate <= max_test:
@@ -103,9 +103,14 @@ def probe_masscan_rate():
 
 CPU_CORES, RAM_MB = detect_hardware()
 MASSCAN_RATE    = probe_masscan_rate()
-CF_SCANNER_CONC = max(200, min(CPU_CORES * 100, 500))
-API_CONCURRENT  = min(CPU_CORES * 16, 32)
+CF_SCANNER_CONC = 30(200, min(CPU_CORES * 100, 500))
+API_CONCURRENT  = 4(CPU_CORES * 16, 32)
 API_CHUNK       = 2000 if RAM_MB < 1024 else 5000
+
+# 强制保障光猫不爆表
+if GLOBAL_COUNTRY in ("CN", "") and MASSCAN_RATE > 800:
+    print(f"  ⚠ 保护光猫连接表，masscan 速率限制为 800pps")
+    MASSCAN_RATE = 800
 
 print(f"  硬件: {CPU_CORES}核 {RAM_MB}MB → masscan {MASSCAN_RATE}pps cf-scanner {CF_SCANNER_CONC}c API {API_CONCURRENT}c")
 
