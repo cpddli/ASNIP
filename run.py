@@ -8,7 +8,7 @@ import sys, os, subprocess, json, urllib.request, multiprocessing, socket, time,
 from pathlib import Path
 from datetime import datetime
 
-# ── 自适应硬件 ──
+# ── 自适应硬件检测 ──
 def detect_hardware():
     cpu = multiprocessing.cpu_count()
     try:
@@ -22,9 +22,9 @@ def detect_hardware():
     return cpu, mem_mb
 
 
-# ── 智能 masscan 速率探测 ──
+# ── 智能自适应 masscan 速率探测 ──
 def probe_masscan_rate():
-    """实测网卡发包上限，返回最优速率"""
+    """根据网络实际响应率（TX 探测比）自适应寻找最佳 pps，兼顾家用光猫与高性能 VPS"""
     iface = None
     try:
         r = subprocess.run(["ip", "-4", "route", "get", "1.1.1.1"],
@@ -35,12 +35,12 @@ def probe_masscan_rate():
     except Exception:
         pass
     if not iface:
-        for name in ["eth0", "ens3", "enp0s3", "enp1s0", "ens5"]:
+        for name in ["eth0", "ens3", "enp0s3", "enp1s0", "ens5", "enp3s0"]:
             if os.path.exists(f"/sys/class/net/{name}/statistics/tx_packets"):
                 iface = name
                 break
     if not iface:
-        return 800
+        return 1000
 
     cidrs = [a for a in sys.argv[1:] if not a.startswith("--") and "/" in a]
     if not cidrs:
@@ -50,13 +50,15 @@ def probe_masscan_rate():
     with open(tmp_cidr, "w") as f:
         f.write("\n".join(sample))
 
-    # 【光猫降压参数】限制测速上限，防止测试阶段挤爆连接表
     best_rate = 800
-    test_rate = 500
-    max_test = 1000
-    probe_sec = 5
+    test_rate = 1000
+    probe_sec = 4
+    ABS_LIMIT = 500000  # 高性能服务器探测上限
 
-    while test_rate <= max_test:
+    sys.stderr.write("  正在动态探测网络吞吐能力...")
+    sys.stderr.flush()
+
+    while test_rate <= ABS_LIMIT:
         try:
             with open(f"/sys/class/net/{iface}/statistics/tx_packets") as f:
                 tx_before = int(f.read().strip())
@@ -71,7 +73,7 @@ def probe_masscan_rate():
         time.sleep(probe_sec)
         proc.terminate()
         try:
-            proc.wait(timeout=3)
+            proc.wait(timeout=2)
         except Exception:
             pass
 
@@ -84,30 +86,36 @@ def probe_masscan_rate():
         actual_pps = (tx_after - tx_before) / probe_sec
         ratio = actual_pps / test_rate
 
-        if ratio >= 0.7:
-            best_rate = test_rate
-            test_rate *= 2
-        elif ratio >= 0.3:
-            best_rate = max(500, int(actual_pps * 0.8))
+        # 吞吐良好 (>=85%)：记录当前最佳值，按 1.5 倍继续向上探索
+        if ratio >= 0.85:
+            best_rate = int(test_rate * 0.85)
+            test_rate = int(test_rate * 1.5)
+        # 吞吐效率下降 (50% ~ 85%)：触碰光猫/网卡瓶颈，立即锁定
+        elif ratio >= 0.50:
+            best_rate = max(800, int(actual_pps * 0.80))
             break
+        # 严重丢包 (<50%)：网络拥堵，强制回退到安全区
         else:
+            best_rate = max(800, int(actual_pps * 0.60))
             break
 
     try:
         os.remove(tmp_cidr)
     except Exception:
         pass
-    return min(best_rate, 800)
+
+    sys.stderr.write(f" 完成 (最佳速率: {best_rate} pps)\n")
+    sys.stderr.flush()
+    return max(800, best_rate)
 
 
-# ── 获取公网 IP (NAT/Docker 环境兼容) ──
+# ── 获取公网 IP ──
 def get_public_ip():
-    """获取公网出口 IP，HTTP API → DNS 多重兜底，局域网也能正确获取"""
     apis = [
-        ("https://api.ipify.org", 5),          # 国际
-        ("https://api-ipv4.ip.sb/ip", 5),      # 国内可用
-        ("https://ifconfig.me/ip", 5),          # 备用
-        ("https://icanhazip.com", 5),           # 备用
+        ("https://api.ipify.org", 5),
+        ("https://api-ipv4.ip.sb/ip", 5),
+        ("https://ifconfig.me/ip", 5),
+        ("https://icanhazip.com", 5),
     ]
     for url, timeout in apis:
         try:
@@ -134,9 +142,8 @@ def get_public_ip():
     return "127.0.0.1"
 
 
-# ── 获取局域网 IP（下载链接用，不走出口 IP） ──
+# ── 获取局域网 IP ──
 def get_lan_ip():
-    """获取本机局域网 IP，用于下载链接；家用宽带出口 IP 无法直连"""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.settimeout(2)
@@ -151,11 +158,10 @@ def get_lan_ip():
 
 # ── 公网 IP + 运营商检测 ──
 def detect_isp():
-    """检测本机公网 IP 及运营商，返回 (ip, country, isp_name)"""
     ip = get_public_ip()
     print(f"\n  本机公网 IP: {ip}")
     if ip == "127.0.0.1":
-        print("  (无法获取公网 IP，请检查网络连接，跳过运营商检测)")
+        print("  (无法获取公网 IP，跳过运营商检测)")
         return ip, "", ""
     try:
         token = None
@@ -182,19 +188,26 @@ def detect_isp():
     return ip, "", ""
 
 
-# ── 1. 先获取 GLOBAL_COUNTRY 变量（解决 NameError） ──
+# ── 1. 先获取 GLOBAL_COUNTRY 变量 ──
 GLOBAL_IP, GLOBAL_COUNTRY, GLOBAL_ISP = detect_isp()
 
-# ── 2. 自适应硬件与光猫保护参数设置 ──
+# ── 2. 自适应硬件与网络速率测速 ──
 CPU_CORES, RAM_MB = detect_hardware()
 MASSCAN_RATE    = probe_masscan_rate()
-CF_SCANNER_CONC = 30  # 锁定为 30 线程，防止并发高打爆光猫表项
-API_CONCURRENT  = 4   # 锁定为 4 线程
-API_CHUNK       = 2000 if RAM_MB < 1024 else 5000
 
-# ── 3. 强制限制 masscan 发包速率 ──
-if GLOBAL_COUNTRY in ("CN", "") and MASSCAN_RATE > 2000:  # 改为 2000
-    MASSCAN_RATE = 2000
+# ── 3. 根据实际测出的发包能力自适应扩缩并发 ──
+if MASSCAN_RATE > 10000:
+    CF_SCANNER_CONC = 200
+    API_CONCURRENT  = 16
+elif MASSCAN_RATE > 3000:
+    CF_SCANNER_CONC = 80
+    API_CONCURRENT  = 8
+else:
+    # 针对家用宽带/光猫的低打扰并发
+    CF_SCANNER_CONC = 30
+    API_CONCURRENT  = 4
+
+API_CHUNK = 2000 if RAM_MB < 1024 else 5000
 
 print(f"  硬件: {CPU_CORES}核 {RAM_MB}MB → masscan {MASSCAN_RATE}pps cf-scanner {CF_SCANNER_CONC}c API {API_CONCURRENT}c")
 
@@ -216,7 +229,7 @@ def fetch_prefixes(asns):
                 data = json.loads(resp.read())
                 count = 0
                 for p in data["data"]["prefixes"]:
-                    if ":" not in p["prefix"]:  # IPv4 only
+                    if ":" not in p["prefix"]:
                         cidrs.append(p["prefix"])
                         count += 1
                 print(f"  AS{asn} → {count} 个 IPv4 CIDR")
