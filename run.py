@@ -394,7 +394,7 @@ def cf_scan():
     print(f"  CF 节点: {hits}")
     return hits
 
-# ── Step 5: API 精筛 ──
+# ── Step 5: API 精筛（优化版：提升并发 + 显示实时进度） ──
 def api_verify():
     hits_file = BASE / "cf_hits.txt"
     verified_file = BASE / "verified.txt"
@@ -403,16 +403,28 @@ def api_verify():
         print("  无 CF 节点，跳过")
         return 0
 
-    subprocess.run([
-        "python3", str(VERIFY_PY),
+    # API 验证不影响光猫连接表，将并发适当提升至 16
+    api_conc = max(API_CONCURRENT, 16)
+
+    print(f"  正在请求 API 精筛 (并发: {api_conc})...")
+    
+    proc = subprocess.Popen([
+        "python3", "-u", str(VERIFY_PY),  # 添加 -u 参数禁止 Python 缓冲输出
         "--input", str(hits_file),
         "--output", str(verified_file),
         "--api", API_URL,
         "--chunk", str(API_CHUNK),
-        "--concurrent", str(API_CONCURRENT)
-    ], check=True)
-    passed = sum(1 for _ in open(verified_file))
-    print(f"  精筛通过: {passed}")
+        "--concurrent", str(api_conc)
+    ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+
+    # 实时刷新 verify.py 的输出，避免终端界面卡住
+    for line in proc.stdout:
+        sys.stdout.write("  " + line)
+        sys.stdout.flush()
+
+    proc.wait()
+    passed = sum(1 for _ in open(verified_file)) if verified_file.exists() else 0
+    print(f"  精筛完成，通过节点: {passed}")
     return passed
 
 # ── Step 6: 测速 ──
