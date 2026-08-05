@@ -40,7 +40,7 @@ def probe_masscan_rate():
                 iface = name
                 break
     if not iface:
-        return 1300
+        return 1000
 
     cidrs = [a for a in sys.argv[1:] if not a.startswith("--") and "/" in a]
     if not cidrs:
@@ -50,8 +50,8 @@ def probe_masscan_rate():
     with open(tmp_cidr, "w") as f:
         f.write("\n".join(sample))
 
-    best_rate = 1300
-    test_rate = 1300
+    best_rate = 800
+    test_rate = 1000
     probe_sec = 4
     ABS_LIMIT = 500000  # 高性能服务器探测上限
 
@@ -92,11 +92,11 @@ def probe_masscan_rate():
             test_rate = int(test_rate * 1.5)
         # 吞吐效率下降 (50% ~ 85%)：触碰光猫/网卡瓶颈，立即锁定
         elif ratio >= 0.50:
-            best_rate = max(1300, int(actual_pps * 0.80))
+            best_rate = max(800, int(actual_pps * 0.80))
             break
         # 严重丢包 (<50%)：网络拥堵，强制回退到安全区
         else:
-            best_rate = max(1300, int(actual_pps * 0.60))
+            best_rate = max(800, int(actual_pps * 0.60))
             break
 
     try:
@@ -106,7 +106,8 @@ def probe_masscan_rate():
 
     sys.stderr.write(f" 完成 (最佳速率: {best_rate} pps)\n")
     sys.stderr.flush()
-    return max(1300, best_rate)
+    return max(800, best_rate)
+
 
 # ── 获取公网 IP ──
 def get_public_ip():
