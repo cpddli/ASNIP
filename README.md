@@ -28,58 +28,13 @@
 curl -fsSL https://github.250887.xyz/https://raw.githubusercontent.com/cpddli/ASNIPtest/main/install.sh | bash
 ```
 
-**Windows**（需先装 WSL2）
-```powershell
-# PowerShell 管理员模式，装完重启
-wsl --install
-
-# 重启后进 Ubuntu 终端
-curl -fsSL https://github.250887.xyz/https://raw.githubusercontent.com/cpddli/ASNIPtest/main/install.sh | bash
-```
-
----
-
-## 安装
-
-### Linux / macOS
-
-一条命令安装所有依赖（masscan、prips）并注册全局命令：
+## 卸载
 
 ```bash
-curl -fsSL https://github.250887.xyz/https://raw.githubusercontent.com/cpddli/ASNIPtest/main/install.sh | bash
+curl -fsSL https://github.250887.xyz/https://raw.githubusercontent.com/cpddli/ASNIPtest/main/uninstall.sh | bash
 ```
 
-安装完成后，在任意目录输入 `cmtjd` 即可启动。
-
-> **手动安装**：如果不想用一键脚本，可以 clone 仓库后手动运行 `python3 run.py`。需自行安装 masscan 和 prips。
-
-### Windows（WSL2）
-
-Windows 10/11 自带 WSL2，装上就能用 Linux 环境：
-
-**第一步：安装 WSL2**
-
-PowerShell 管理员模式运行：
-
-```powershell
-wsl --install
-```
-
-系统会自动安装 Ubuntu + WSL2 内核。完成后**重启电脑**。
-
-**第二步：安装 ASNIPtest**
-
-重启后开始菜单会多一个「Ubuntu」应用，打开它，输入：
-
-```bash
-curl -fsSL https://github.250887.xyz/https://raw.githubusercontent.com/cpddli/ASNIPtest/main/install.sh | bash
-```
-
-> WSL2 默认使用桥接模式，正式测试时需调整为 NAT 模式才能正常使用 masscan。
-
----
-
-## 使用
+这会删除 `cmtjd` 命令和 `~/ASNIPtest` 目录。
 
 ### 命令行模式
 
@@ -90,8 +45,6 @@ cmtjd AS209242            # 单个 ASN
 cmtjd AS209242,AS3214     # 多个 ASN（逗号分隔）
 cmtjd AS209242 AS3214     # 多个 ASN（空格分隔）
 ```
-
-> 手动运行时用 `python3 run.py` 代替 `cmtjd`。
 
 ### 后台运行（SSH 断线不杀）
 
@@ -118,8 +71,6 @@ screen -S scan
 
 ```bash
 cmtjd
-```
-
 ```
   硬件: 4核 2048MB → masscan 4000pps ...
 
@@ -189,15 +140,7 @@ http://1.2.3.4:8899/output_AS209242_20260617_120000.csv
 
 ## 硬件自适应
 
-启动时自动探测网卡实际发包能力（取最优速率的 80%），同时根据 CPU 核数和内存调整并发：
-
-| 硬件配置 | masscan 速率 | cf-scanner 并发 | API 并发 |
-|---|---|---|---|
-| 任何配置 | 自动实测网卡上限×80% | 200~500 | 8~32 |
-
-> 速率探测耗时约 30 秒，使用前 50 个 CIDR 样本以递增速率测试，找到网卡瓶颈后稳定运行。探测失败时回退 CPU×1000 估算。cf-scanner 并发最低 200，最高 500。
-
----
+启动时自动探测网卡实际发包能力（取最优速率的 80%），同时根据 CPU 核数和内存调整并发
 
 ## 依赖
 
@@ -221,15 +164,6 @@ masscan 依赖 **raw socket**（CAP_NET_RAW），以下环境有限制：
 
 ---
 
-## 卸载
-
-```bash
-curl -fsSL https://github.250887.xyz/https://raw.githubusercontent.com/cpddli/ASNIPtest/main/uninstall.sh | bash
-```
-
-这会删除 `cmtjd` 命令和 `~/ASNIPtest` 目录。
-
----
 
 ## 鸣谢
 
