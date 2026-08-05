@@ -22,9 +22,12 @@ def detect_hardware():
     return cpu, mem_mb
 
 
-# ── 智能自适应 masscan 速率探测 ──
-def probe_masscan_rate():
-    """根据网络实际响应率（TX 探测比）自适应寻找最佳 pps，兼顾家用光猫与高性能 VPS"""
+# ── 智能自适应 masscan 速率探测（带家宽保护） ──
+def probe_masscan_rate(max_limit=30000):
+    """
+    根据网络实际响应率（TX 探测比）自适应寻找最佳 pps
+    :param max_limit: 探测绝对上限 (针对家宽/光猫建议 20000~50000，高性能 VPS 可设 500000)
+    """
     iface = None
     try:
         r = subprocess.run(["ip", "-4", "route", "get", "1.1.1.1"],
@@ -35,7 +38,7 @@ def probe_masscan_rate():
     except Exception:
         pass
     if not iface:
-        for name in ["eth0", "ens3", "enp0s3", "enp1s0", "ens5", "enp3s0"]:
+        for name in ["eth0", "ens3", "enp0s3", "enp1s0", "ens5", "enp3s0", "wlan0"]:
             if os.path.exists(f"/sys/class/net/{name}/statistics/tx_packets"):
                 iface = name
                 break
@@ -50,15 +53,15 @@ def probe_masscan_rate():
     with open(tmp_cidr, "w") as f:
         f.write("\n".join(sample))
 
-    best_rate = 800
-    test_rate = 1000
-    probe_sec = 4
-    ABS_LIMIT = 500000  # 高性能服务器探测上限
-
-    sys.stderr.write("  正在动态探测网络吞吐能力...")
+    # 探测参数配置
+    test_rate = 1000       # 起步探测速率 (pps)
+    best_rate = 800        # 保底安全速率 (pps)
+    probe_sec = 3          # 每次探测时长 (秒)
+    
+    sys.stderr.write(f"  正在动态探测网络吞吐能力 (上限: {max_limit} pps)...")
     sys.stderr.flush()
 
-    while test_rate <= ABS_LIMIT:
+    while test_rate <= max_limit:
         try:
             with open(f"/sys/class/net/{iface}/statistics/tx_packets") as f:
                 tx_before = int(f.read().strip())
@@ -86,15 +89,24 @@ def probe_masscan_rate():
         actual_pps = (tx_after - tx_before) / probe_sec
         ratio = actual_pps / test_rate
 
-        # 吞吐良好 (>=85%)：记录当前最佳值，按 1.5 倍继续向上探索
-        if ratio >= 0.85:
-            best_rate = int(test_rate * 0.85)
-            test_rate = int(test_rate * 1.5)
-        # 吞吐效率下降 (50% ~ 85%)：触碰光猫/网卡瓶颈，立即锁定
-        elif ratio >= 0.50:
+        # 1. 吞吐极佳 (TX 发送率 >= 90%)：记录当前安全速率，平缓提升下一轮探测值
+        if ratio >= 0.90:
+            # 取当前实际能力的 85% 作为暂时候选值，防止正好踩在临界点
+            best_rate = max(best_rate, int(actual_pps * 0.85))
+            
+            # 如果已经接近用户设定的上限，直接锁定退出
+            if test_rate >= max_limit:
+                break
+                
+            # 平缓递增：以 1.25 倍增长，避免幅度过大瞬间塞爆光猫 buffer
+            test_rate = min(max_limit, int(test_rate * 1.25))
+
+        # 2. 出现轻微积压/降速 (70% <= ratio < 90%)：触碰网卡/路由器处理瓶颈，立即锁定并留出 20% 安全余量
+        elif ratio >= 0.70:
             best_rate = max(800, int(actual_pps * 0.80))
             break
-        # 严重丢包 (<50%)：网络拥堵，强制回退到安全区
+
+        # 3. 严重拥堵/严重丢包 (ratio < 70%)：说明网络已卡顿或开始丢包，强制退回更保守的安全区
         else:
             best_rate = max(800, int(actual_pps * 0.60))
             break
@@ -104,7 +116,7 @@ def probe_masscan_rate():
     except Exception:
         pass
 
-    sys.stderr.write(f" 完成 (最佳速率: {best_rate} pps)\n")
+    sys.stderr.write(f" 完成 (最佳安全速率: {best_rate} pps)\n")
     sys.stderr.flush()
     return max(800, best_rate)
 
