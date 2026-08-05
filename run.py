@@ -22,7 +22,7 @@ def detect_hardware():
     return cpu, mem_mb
 
 
-# ── 智能自适应 masscan 速率探测（带家宽保护） ──
+# ── 智能自适应 masscan 速率探测（最低 1300 pps） ──
 def probe_masscan_rate(max_limit=30000):
     """
     根据网络实际响应率（TX 探测比）自适应寻找最佳 pps
@@ -43,7 +43,7 @@ def probe_masscan_rate(max_limit=30000):
                 iface = name
                 break
     if not iface:
-        return 1000
+        return 1300
 
     cidrs = [a for a in sys.argv[1:] if not a.startswith("--") and "/" in a]
     if not cidrs:
@@ -54,8 +54,8 @@ def probe_masscan_rate(max_limit=30000):
         f.write("\n".join(sample))
 
     # 探测参数配置
-    test_rate = 1000       # 起步探测速率 (pps)
-    best_rate = 800        # 保底安全速率 (pps)
+    test_rate = 3000       # 提升起步探测速率到 3000 pps
+    best_rate = 1300       # 默认保底速率修改为 1300 pps
     probe_sec = 3          # 每次探测时长 (秒)
     
     sys.stderr.write(f"  正在动态探测网络吞吐能力 (上限: {max_limit} pps)...")
@@ -89,26 +89,21 @@ def probe_masscan_rate(max_limit=30000):
         actual_pps = (tx_after - tx_before) / probe_sec
         ratio = actual_pps / test_rate
 
-        # 1. 吞吐极佳 (TX 发送率 >= 90%)：记录当前安全速率，平缓提升下一轮探测值
-        if ratio >= 0.90:
-            # 取当前实际能力的 85% 作为暂时候选值，防止正好踩在临界点
-            best_rate = max(best_rate, int(actual_pps * 0.85))
-            
-            # 如果已经接近用户设定的上限，直接锁定退出
+        # 1. 吞吐正常 (TX 发送率 >= 80%)：按 1.5 倍继续向上探索
+        if ratio >= 0.80:
+            best_rate = max(1300, int(actual_pps * 0.85))
             if test_rate >= max_limit:
                 break
-                
-            # 平缓递增：以 1.25 倍增长，避免幅度过大瞬间塞爆光猫 buffer
-            test_rate = min(max_limit, int(test_rate * 1.25))
+            test_rate = min(max_limit, int(test_rate * 1.5))
 
-        # 2. 出现轻微积压/降速 (70% <= ratio < 90%)：触碰网卡/路由器处理瓶颈，立即锁定并留出 20% 安全余量
+        # 2. 出现轻微积压/降速 (70% <= ratio < 80%)：触碰瓶颈，锁定并回退
         elif ratio >= 0.70:
-            best_rate = max(800, int(actual_pps * 0.80))
+            best_rate = max(1300, int(actual_pps * 0.80))
             break
 
-        # 3. 严重拥堵/严重丢包 (ratio < 70%)：说明网络已卡顿或开始丢包，强制退回更保守的安全区
+        # 3. 严重拥堵/丢包 (ratio < 70%)：强制退回更保守的安全区（不低于 1300）
         else:
-            best_rate = max(800, int(actual_pps * 0.60))
+            best_rate = max(1300, int(actual_pps * 0.60))
             break
 
     try:
@@ -118,7 +113,7 @@ def probe_masscan_rate(max_limit=30000):
 
     sys.stderr.write(f" 完成 (最佳安全速率: {best_rate} pps)\n")
     sys.stderr.flush()
-    return max(800, best_rate)
+    return max(1300, best_rate)
 
 
 # ── 获取公网 IP ──
