@@ -69,106 +69,165 @@ def send_to_telegram(file_path, text_msg=""):
         print(f"  ❌ TG 推送出错: {e}")
 
 
-# ── 自适应硬件检测 ──
-def detect_hardware():
-    cpu = multiprocessing.cpu_count()
-    try:
-        with open("/proc/meminfo") as f:
-            for line in f:
-                if "MemAvailable" in line:
-                    mem_mb = int(line.split()[1]) // 1024
-                    break
-    except:
-        mem_mb = 512
-    return cpu, mem_mb
+import os
+import re
+import subprocess
+import tempfile
+import time
 
 
-# ── 智能自适应 masscan 速率探测 ──
 def probe_masscan_rate():
-    """根据网络实际响应率（TX 探测比）自适应寻找最佳 pps，兼顾家用光猫与高性能 VPS"""
+    """根据网卡实际发包能力自动探测 masscan 最佳速率"""
+
     iface = None
+
+    # 1. 动态获取默认出口网卡
     try:
-        r = subprocess.run(["ip", "-4", "route", "get", "1.1.1.1"],
-                           capture_output=True, text=True, timeout=5)
-        m = __import__("re").search(r"dev\s+(\S+)", r.stdout)
+        r = subprocess.run(
+            ["ip", "-4", "route", "get", "1.1.1.1"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        m = re.search(r"dev\s+(\S+)", r.stdout)
         if m:
             iface = m.group(1)
     except Exception:
         pass
+
+    # Fallback 网卡自动搜索
     if not iface:
         for name in ["eth0", "ens3", "enp0s3", "enp1s0", "ens5", "enp3s0"]:
             if os.path.exists(f"/sys/class/net/{name}/statistics/tx_packets"):
                 iface = name
                 break
+
     if not iface:
-        return 1000
+        print("  ⚠️ 未检测到有效网卡，使用默认保底速率 2000 pps")
+        return 2000
 
-    cidrs = [a for a in sys.argv[1:] if not a.startswith("--") and "/" in a]
-    if not cidrs:
-        cidrs = ["1.1.1.0/24", "8.8.8.0/24", "9.9.9.0/24"]
-    sample = cidrs[:50]
-    tmp_cidr = "/tmp/.masscan_rate_test"
+    # 2. 根据网络环境决定探测上限
+    is_cn_home = GLOBAL_COUNTRY == "CN" and any(
+        x in GLOBAL_ISP for x in ["电信", "联通", "移动", "广电"]
+    )
+
+    if is_cn_home:
+        MAX_RATE = 10000
+        print("  检测到国内家宽运营商，探测上限：10000 pps")
+    else:
+        MAX_RATE = 200000
+        print("  检测到公网/VPS 环境，探测上限：200000 pps")
+
+    sample_cidrs = ["1.0.0.0/16", "1.1.0.0/16", "1.2.0.0/16", "8.8.0.0/16"]
+
+    # 使用带有 PID 的临时文件，防止文件冲突
+    tmp_cidr = f"/tmp/.masscan_rate_test_{os.getpid()}"
     with open(tmp_cidr, "w") as f:
-        f.write("\n".join(sample))
+        f.write("\n".join(sample_cidrs))
 
-    best_rate = 800
+    probe_sec = 5
+    best_rate = 2000
     test_rate = 1000
-    probe_sec = 4
-    ABS_LIMIT = 500000  # 高性能服务器探测上限
+    sudo_cmd = [] if os.geteuid() == 0 else ["sudo"]
 
-    sys.stderr.write("  正在动态探测网络吞吐能力...")
-    sys.stderr.flush()
+    print("  正在探测最佳 masscan 发包速率...")
 
-    while test_rate <= ABS_LIMIT:
-        try:
-            with open(f"/sys/class/net/{iface}/statistics/tx_packets") as f:
-                tx_before = int(f.read().strip())
-        except Exception:
-            break
-
-        proc = subprocess.Popen(
-            ["masscan", "-iL", tmp_cidr, "-p", "443",
-             "--rate", str(test_rate), "-oX", "/dev/null"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-        time.sleep(probe_sec)
-        proc.terminate()
-        try:
-            proc.wait(timeout=2)
-        except Exception:
-            pass
-
-        try:
-            with open(f"/sys/class/net/{iface}/statistics/tx_packets") as f:
-                tx_after = int(f.read().strip())
-        except Exception:
-            break
-
-        actual_pps = (tx_after - tx_before) / probe_sec
-        ratio = actual_pps / test_rate
-
-        # 吞吐良好 (>=85%)：记录当前最佳值，按 1.5 倍继续向上探索
-        if ratio >= 0.85:
-            best_rate = int(test_rate * 0.85)
-            test_rate = int(test_rate * 1.5)
-        # 吞吐效率下降 (50% ~ 85%)：触碰光猫/网卡瓶颈，立即锁定
-        elif ratio >= 0.50:
-            best_rate = max(800, int(actual_pps * 0.80))
-            break
-        # 严重丢包 (<50%)：网络拥堵，强制回退到安全区
-        else:
-            best_rate = max(800, int(actual_pps * 0.60))
-            break
+    proc = None  # 提前声明防止异常块引用解引用崩溃
 
     try:
-        os.remove(tmp_cidr)
-    except Exception:
-        pass
+        while test_rate <= MAX_RATE:
+            try:
+                with open(
+                    f"/sys/class/net/{iface}/statistics/tx_packets"
+                ) as f:
+                    tx_before = int(f.read().strip())
+            except Exception:
+                break
 
-    sys.stderr.write(f" 完成 (最佳速率: {best_rate} pps)\n")
-    sys.stderr.flush()
-    return max(800, best_rate)
+            cmd = sudo_cmd + [
+                "masscan",
+                "-iL",
+                tmp_cidr,
+                "-p",
+                "443",
+                "--rate",
+                str(test_rate),
+                "-oX",
+                "/dev/null",
+            ]
 
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            time.sleep(probe_sec)
+
+            # 进程状态检测
+            if proc.poll() is not None and proc.returncode != 0:
+                print("    ⚠️ masscan 启动失败，可能缺少 root 权限")
+                break
+
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except Exception:
+                proc.kill()
+            proc = None  # 重置状态
+
+            try:
+                with open(
+                    f"/sys/class/net/{iface}/statistics/tx_packets"
+                ) as f:
+                    tx_after = int(f.read().strip())
+            except Exception:
+                break
+
+            actual_pps = (tx_after - tx_before) / probe_sec
+            ratio = actual_pps / test_rate
+
+            print(
+                f"    测试 {test_rate:>6}pps -> 实际 {actual_pps:>8.0f}pps ({ratio:.2f})"
+            )
+
+            # 评估瓶颈状态
+            if ratio >= 0.60:
+                # 保留测试设定的 85% 作为安全冗余，但不能低于实际吞吐的 85%
+                recommended = int(max(test_rate * 0.85, actual_pps * 0.85))
+                best_rate = max(best_rate, recommended)
+
+                if test_rate >= MAX_RATE:
+                    break
+
+                # 递进速率算法
+                if test_rate < 10000:
+                    test_rate = min(test_rate * 2, MAX_RATE)
+                else:
+                    test_rate = min(int(test_rate * 1.5), MAX_RATE)
+
+            elif ratio >= 0.35:
+                # 出现较明显丢包瓶颈，取实际最大能力的 85% 终止测试
+                best_rate = max(best_rate, int(actual_pps * 0.85))
+                break
+            else:
+                # 严重瓶颈或接口限速，保持之前的最佳值（或保底 2000）
+                best_rate = max(best_rate, 2000)
+                break
+
+    except KeyboardInterrupt:
+        if proc and proc.poll() is None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        raise
+    finally:
+        if os.path.exists(tmp_cidr):
+            try:
+                os.remove(tmp_cidr)
+            except Exception:
+                pass
+
+    print(f"  ✓ 自动选择 {best_rate} pps")
+    return best_rate
 
 # ── 获取公网 IP ──
 def get_public_ip():
