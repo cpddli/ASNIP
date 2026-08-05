@@ -8,6 +8,67 @@ import sys, os, subprocess, json, urllib.request, multiprocessing, socket, time,
 from pathlib import Path
 from datetime import datetime
 
+# ── Telegram 推送配置 ──
+TG_BOT_TOKEN = "7580123422:AAHMqV-IsSL_wnwpzqshHP51Xul34kOU59Xo"  # 你的 Bot Token
+TG_CHAT_ID   = "6682393086"  # ⚠️ 请将此处替换为你的真实 TG Chat ID (如 123456789)
+TG_API_HOST  = "tg.250887.xyz"  # 自建的 CF 反代域名
+
+
+def send_to_telegram(file_path, text_msg=""):
+    """使用 TG Bot API 通过 Cloudflare 反代发送 CSV 结果文件"""
+    if not TG_BOT_TOKEN or not TG_CHAT_ID or TG_CHAT_ID == "YOUR_CHAT_ID":
+        print("  ⚠️ 未配置 TG_CHAT_ID，跳过 Telegram 推送")
+        return
+
+    url = f"https://{TG_API_HOST}/bot{TG_BOT_TOKEN}/sendDocument"
+    print("\n  正在通过 Telegram Bot 推送文件...")
+
+    try:
+        boundary = '----WebKitFormBoundary7MA4YWxkTrZu0gW'
+        body = []
+
+        # 1. 附加 chat_id
+        body.append(f'--{boundary}'.encode())
+        body.append(b'Content-Disposition: form-data; name="chat_id"')
+        body.append(b'')
+        body.append(str(TG_CHAT_ID).encode())
+
+        # 2. 附加 caption 说明文本
+        if text_msg:
+            body.append(f'--{boundary}'.encode())
+            body.append(b'Content-Disposition: form-data; name="caption"')
+            body.append(b'')
+            body.append(text_msg.encode())
+
+        # 3. 附加文件内容
+        file_path = Path(file_path)
+        body.append(f'--{boundary}'.encode())
+        body.append(f'Content-Disposition: form-data; name="document"; filename="{file_path.name}"'.encode())
+        body.append(b'Content-Type: text/csv')
+        body.append(b'')
+        body.append(file_path.read_bytes())
+
+        body.append(f'--{boundary}--'.encode())
+        body.append(b'')
+
+        payload = b'\r\n'.join(body)
+
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={'Content-Type': f'multipart/form-data; boundary={boundary}'}
+        )
+
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            res = json.loads(resp.read())
+            if res.get("ok"):
+                print("  ✓ Telegram 文件推送成功！")
+            else:
+                print(f"  ❌ TG 推送失败: {res}")
+    except Exception as e:
+        print(f"  ❌ TG 推送出错: {e}")
+
+
 # ── 自适应硬件检测 ──
 def detect_hardware():
     cpu = multiprocessing.cpu_count()
@@ -503,7 +564,7 @@ def speed_test():
 
     sys.stderr.write(f"\r  [{'█' * 30}] 100.0% | 测速完成: {total} 个节点{'':20}\n")
 
-# ── 输出 + 下载链接 ──
+# ── 输出 + TG 推送 + 下载链接 ──
 def output_csv(asns):
     verified_file = BASE / "verified.txt"
     if not verified_file.exists() or verified_file.stat().st_size == 0:
@@ -529,6 +590,16 @@ def output_csv(asns):
             f.write(line + "\n")
 
     print(f"\n  结果: {len(lines)} 条 → {output.name}")
+
+    # ── 触发 Telegram Bot 推送 ──
+    caption = (
+        f"📊 优选 IP 扫描完成\n"
+        f"────────────────\n"
+        f"🔹 ASN: {', '.join(asns)}\n"
+        f"🔹 有效节点: {len(lines)} 个\n"
+        f"📅 时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+    send_to_telegram(output, text_msg=caption)
 
     lan_ip = get_lan_ip()
     port = 8899
