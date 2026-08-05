@@ -29,7 +29,7 @@ def probe_masscan_rate():
     try:
         r = subprocess.run(["ip", "-4", "route", "get", "1.1.1.1"],
                            capture_output=True, text=True, timeout=5)
-        m = __import__("re").search(r"dev\s+(\S+)", r.stdout)
+        m = re.search(r"dev\s+(\S+)", r.stdout)
         if m:
             iface = m.group(1)
     except Exception:
@@ -394,7 +394,7 @@ def cf_scan():
     print(f"  CF 节点: {hits}")
     return hits
 
-# ── Step 5: API 精筛（优化版：提升并发 + 显示实时进度） ──
+# ── Step 5: API 精筛 ──
 def api_verify():
     hits_file = BASE / "cf_hits.txt"
     verified_file = BASE / "verified.txt"
@@ -403,13 +403,11 @@ def api_verify():
         print("  无 CF 节点，跳过")
         return 0
 
-    # API 验证不影响光猫连接表，将并发适当提升至 16
     api_conc = max(API_CONCURRENT, 16)
-
     print(f"  正在请求 API 精筛 (并发: {api_conc})...")
     
     proc = subprocess.Popen([
-        "python3", "-u", str(VERIFY_PY),  # 添加 -u 参数禁止 Python 缓冲输出
+        "python3", "-u", str(VERIFY_PY),
         "--input", str(hits_file),
         "--output", str(verified_file),
         "--api", API_URL,
@@ -417,7 +415,6 @@ def api_verify():
         "--concurrent", str(api_conc)
     ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
 
-    # 实时刷新 verify.py 的输出，避免终端界面卡住
     for line in proc.stdout:
         sys.stdout.write("  " + line)
         sys.stdout.flush()
@@ -427,19 +424,23 @@ def api_verify():
     print(f"  精筛完成，通过节点: {passed}")
     return passed
 
+# ── Step 6: 节点测速 ──
+def speed_test():
+    verified_file = BASE / "verified.txt"
+    if not verified_file.exists() or verified_file.stat().st_size == 0:
+        print("  无节点，跳过测速")
+        return
+
     lines = []
     with open(verified_file) as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
-            if line.startswith("IP地址"):
-                lines.append(line)
-                continue
             lines.append(line)
 
     if len(lines) <= 1:
-        print("  无节点，跳过")
+        print("  无有效数据，跳过")
         return
 
     header = lines[0]
@@ -541,7 +542,7 @@ def output_csv(asns):
                                  capture_output=True, text=True, timeout=5)
             for line in out.stdout.split("\n"):
                 if f":{p}" in line and "users:" in line:
-                    m = __import__("re").search(r"pid=(\d+)", line)
+                    m = re.search(r"pid=(\d+)", line)
                     if m:
                         os.kill(int(m.group(1)), signal.SIGTERM)
                         time.sleep(0.5)
@@ -638,10 +639,10 @@ if __name__ == "__main__":
                 break
 
     steps = [
-        ("1/6 ASN→CIDR", lambda: fetch_prefixes(asns)),
-        ("2/6 masscan",   lambda: run_masscan(scan_ports)),
-        ("3/6 cf-scanner", cf_scan),
-        ("4/6 API精筛",   api_verify),
+        ("1/5 ASN→CIDR", lambda: fetch_prefixes(asns)),
+        ("2/5 masscan",   lambda: run_masscan(scan_ports)),
+        ("3/5 cf-scanner", cf_scan),
+        ("4/5 API精筛",   api_verify),
     ]
 
     choice = ""
@@ -650,7 +651,7 @@ if __name__ == "__main__":
     except (EOFError, KeyboardInterrupt):
         pass
     if choice == "y":
-        steps.append(("6/6 测速", speed_test))
+        steps.append(("5/5 测速", speed_test))
     else:
         print("  跳过测速\n")
 
