@@ -22,23 +22,20 @@ def detect_hardware():
     return cpu, mem_mb
 
 
-# ── 智能自适应 masscan 速率探测（最低 1300 pps） ──
-def probe_masscan_rate(max_limit=30000):
-    """
-    根据网络实际响应率（TX 探测比）自适应寻找最佳 pps
-    :param max_limit: 探测绝对上限 (针对家宽/光猫建议 20000~50000，高性能 VPS 可设 500000)
-    """
+# ── 智能自适应 masscan 速率探测 ──
+def probe_masscan_rate():
+    """根据网络实际响应率（TX 探测比）自适应寻找最佳 pps，兼顾家用光猫与高性能 VPS"""
     iface = None
     try:
         r = subprocess.run(["ip", "-4", "route", "get", "1.1.1.1"],
                            capture_output=True, text=True, timeout=5)
-        m = re.search(r"dev\s+(\S+)", r.stdout)
+        m = __import__("re").search(r"dev\s+(\S+)", r.stdout)
         if m:
             iface = m.group(1)
     except Exception:
         pass
     if not iface:
-        for name in ["eth0", "ens3", "enp0s3", "enp1s0", "ens5", "enp3s0", "wlan0"]:
+        for name in ["eth0", "ens3", "enp0s3", "enp1s0", "ens5", "enp3s0"]:
             if os.path.exists(f"/sys/class/net/{name}/statistics/tx_packets"):
                 iface = name
                 break
@@ -53,15 +50,15 @@ def probe_masscan_rate(max_limit=30000):
     with open(tmp_cidr, "w") as f:
         f.write("\n".join(sample))
 
-    # 探测参数配置
-    test_rate = 3000       # 提升起步探测速率到 3000 pps
-    best_rate = 1300       # 默认保底速率修改为 1300 pps
-    probe_sec = 3          # 每次探测时长 (秒)
-    
-    sys.stderr.write(f"  正在动态探测网络吞吐能力 (上限: {max_limit} pps)...")
+    best_rate = 1300
+    test_rate = 1300
+    probe_sec = 4
+    ABS_LIMIT = 500000  # 高性能服务器探测上限
+
+    sys.stderr.write("  正在动态探测网络吞吐能力...")
     sys.stderr.flush()
 
-    while test_rate <= max_limit:
+    while test_rate <= ABS_LIMIT:
         try:
             with open(f"/sys/class/net/{iface}/statistics/tx_packets") as f:
                 tx_before = int(f.read().strip())
@@ -89,19 +86,15 @@ def probe_masscan_rate(max_limit=30000):
         actual_pps = (tx_after - tx_before) / probe_sec
         ratio = actual_pps / test_rate
 
-        # 1. 吞吐正常 (TX 发送率 >= 80%)：按 1.5 倍继续向上探索
-        if ratio >= 0.80:
-            best_rate = max(1300, int(actual_pps * 0.85))
-            if test_rate >= max_limit:
-                break
-            test_rate = min(max_limit, int(test_rate * 1.5))
-
-        # 2. 出现轻微积压/降速 (70% <= ratio < 80%)：触碰瓶颈，锁定并回退
-        elif ratio >= 0.70:
+        # 吞吐良好 (>=85%)：记录当前最佳值，按 1.5 倍继续向上探索
+        if ratio >= 0.85:
+            best_rate = int(test_rate * 0.85)
+            test_rate = int(test_rate * 1.5)
+        # 吞吐效率下降 (50% ~ 85%)：触碰光猫/网卡瓶颈，立即锁定
+        elif ratio >= 0.50:
             best_rate = max(1300, int(actual_pps * 0.80))
             break
-
-        # 3. 严重拥堵/丢包 (ratio < 70%)：强制退回更保守的安全区（不低于 1300）
+        # 严重丢包 (<50%)：网络拥堵，强制回退到安全区
         else:
             best_rate = max(1300, int(actual_pps * 0.60))
             break
@@ -111,10 +104,9 @@ def probe_masscan_rate(max_limit=30000):
     except Exception:
         pass
 
-    sys.stderr.write(f" 完成 (最佳安全速率: {best_rate} pps)\n")
+    sys.stderr.write(f" 完成 (最佳速率: {best_rate} pps)\n")
     sys.stderr.flush()
     return max(1300, best_rate)
-
 
 # ── 获取公网 IP ──
 def get_public_ip():
@@ -401,7 +393,7 @@ def cf_scan():
     print(f"  CF 节点: {hits}")
     return hits
 
-# ── Step 5: API 精筛 ──
+# ── Step 5: API 精筛（优化版：提升并发 + 显示实时进度） ──
 def api_verify():
     hits_file = BASE / "cf_hits.txt"
     verified_file = BASE / "verified.txt"
@@ -410,11 +402,13 @@ def api_verify():
         print("  无 CF 节点，跳过")
         return 0
 
+    # API 验证不影响光猫连接表，将并发适当提升至 16
     api_conc = max(API_CONCURRENT, 16)
+
     print(f"  正在请求 API 精筛 (并发: {api_conc})...")
     
     proc = subprocess.Popen([
-        "python3", "-u", str(VERIFY_PY),
+        "python3", "-u", str(VERIFY_PY),  # 添加 -u 参数禁止 Python 缓冲输出
         "--input", str(hits_file),
         "--output", str(verified_file),
         "--api", API_URL,
@@ -422,6 +416,7 @@ def api_verify():
         "--concurrent", str(api_conc)
     ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
 
+    # 实时刷新 verify.py 的输出，避免终端界面卡住
     for line in proc.stdout:
         sys.stdout.write("  " + line)
         sys.stdout.flush()
@@ -431,11 +426,11 @@ def api_verify():
     print(f"  精筛完成，通过节点: {passed}")
     return passed
 
-# ── Step 6: 节点测速 ──
+# ── Step 6: 测速 ──
 def speed_test():
     verified_file = BASE / "verified.txt"
     if not verified_file.exists() or verified_file.stat().st_size == 0:
-        print("  无节点，跳过测速")
+        print("  无节点，跳过")
         return
 
     lines = []
@@ -444,10 +439,13 @@ def speed_test():
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
+            if line.startswith("IP地址"):
+                lines.append(line)
+                continue
             lines.append(line)
 
     if len(lines) <= 1:
-        print("  无有效数据，跳过")
+        print("  无节点，跳过")
         return
 
     header = lines[0]
@@ -549,7 +547,7 @@ def output_csv(asns):
                                  capture_output=True, text=True, timeout=5)
             for line in out.stdout.split("\n"):
                 if f":{p}" in line and "users:" in line:
-                    m = re.search(r"pid=(\d+)", line)
+                    m = __import__("re").search(r"pid=(\d+)", line)
                     if m:
                         os.kill(int(m.group(1)), signal.SIGTERM)
                         time.sleep(0.5)
@@ -646,10 +644,10 @@ if __name__ == "__main__":
                 break
 
     steps = [
-        ("1/5 ASN→CIDR", lambda: fetch_prefixes(asns)),
-        ("2/5 masscan",   lambda: run_masscan(scan_ports)),
-        ("3/5 cf-scanner", cf_scan),
-        ("4/5 API精筛",   api_verify),
+        ("1/6 ASN→CIDR", lambda: fetch_prefixes(asns)),
+        ("2/6 masscan",   lambda: run_masscan(scan_ports)),
+        ("3/6 cf-scanner", cf_scan),
+        ("4/6 API精筛",   api_verify),
     ]
 
     choice = ""
@@ -658,7 +656,7 @@ if __name__ == "__main__":
     except (EOFError, KeyboardInterrupt):
         pass
     if choice == "y":
-        steps.append(("5/5 测速", speed_test))
+        steps.append(("6/6 测速", speed_test))
     else:
         print("  跳过测速\n")
 
