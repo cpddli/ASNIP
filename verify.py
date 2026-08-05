@@ -72,6 +72,8 @@ def main():
     parser.add_argument(
         "--api", default="https://cfapi.250887.xyz/check", help="API 接口地址"
     )
+    # 增加 --chunk 参数以保证与 run.py 传入的参数无缝兼容
+    parser.add_argument("--chunk", type=int, default=5000, help="兼容性分块大小")
     parser.add_argument(
         "--concurrent", type=int, default=32, help="线程并发数"
     )
@@ -105,14 +107,14 @@ def main():
                 for line in all_lines
             }
 
-            # 逐个接收完成结果，实现真正的实时进度打印
+            # 逐个接收完成结果，实现实时进度打印
             for future in as_completed(future_to_line):
                 done += 1
                 result = future.result()
 
                 if result:
                     out.write(result + "\n")
-                    out.flush()  # 实时刷盘，防止中途断电/中断丢失数据
+                    out.flush()  # 实时刷盘，防止丢失数据
                     passed += 1
 
                 # 计算并刷新实时进度条
