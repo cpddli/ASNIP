@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-cf-ip-scanner — ASN IP 提取、Masscan 扫描与 Cloudflare 节点精筛 (N100 优化版)
+cf-ip-scanner — ASN IP 提取、Masscan 扫描与 Cloudflare 节点精筛
 用法: python3 run.py AS209242 [AS3214 ...] [-p 80,443] [-s]
 """
 
@@ -21,12 +21,12 @@ from pathlib import Path
 BASE = Path(__file__).parent.resolve()
 CF_SCANNER = BASE / "cf-scanner"
 VERIFY_PY = BASE / "verify.py"
-API_URL = "https://cfapi.250887.xyz/check"
+API_URL = "https://api.090227.xyz/check"
 HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64; cf-ip-scanner/3.0)"}
 
-# ── 家用光猫与 N100 优化参数配置 ──
+# ── 家用光猫优化参数配置 ──
 MASSCAN_RATE = 3000      # 限制在 3000 pps，保护家用光猫 NAT 连接表不崩溃/不丢包
-CF_SCANNER_CONC = 120    # N100 多核处理能力
+CF_SCANNER_CONC = 120    #  多核处理能力
 API_CONCURRENT = 32      # API 并发精筛
 API_CHUNK = 5000         # 16GB 大内存 Chunk 优化
 SPEEDTEST_THREADS = 16   # 多线程并发测速
@@ -41,7 +41,7 @@ def get_public_ip():
     for url in apis:
         try:
             req = urllib.request.Request(url, headers=HEADERS)
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with urllib.request.urlopen(req, timeout=12) as resp:
                 ip = resp.read().decode("utf-8").strip()
                 if ip and "." in ip:
                     return ip
@@ -125,7 +125,7 @@ def fetch_prefixes(asns):
     return cidr_list
 
 
-# ── 端口解析 ──
+# ── 端口读取与校验 ──
 def get_default_ports():
     ports_file = BASE / "ports.txt"
     if not ports_file.exists():
@@ -335,7 +335,7 @@ def _test_node(entry):
     return ",".join(parts), latency, speed_mbps
 
 
-# ── Step 5: N100 多线程并发测速 ──
+# ── Step 5:  多线程并发测速 ──
 def speed_test():
     verified_file = BASE / "verified.txt"
     if not verified_file.exists() or verified_file.stat().st_size == 0:
@@ -451,13 +451,14 @@ def output_csv(asns):
 
 # ── Main ──
 def main():
-    parser = argparse.ArgumentParser(description="Cloudflare IP Scanner - N100 优化版")
+    parser = argparse.ArgumentParser(description="Cloudflare IP Scanner -  优化版")
     parser.add_argument("asns", nargs="*", help="ASN 编号，如 AS209242")
     parser.add_argument("-p", "--ports", type=str, default="", help="端口 (例: 443 或 80,443)")
     parser.add_argument("-s", "--speedtest", action="store_true", help="自动启动测速")
 
     args = parser.parse_args()
 
+    # 1. 确认 ASN
     raw_asns = args.asns
     if not raw_asns:
         try:
@@ -475,18 +476,31 @@ def main():
     print(f"\n  目标 ASN: {', '.join(f'AS{a}' for a in asns)}")
     detect_isp()
 
-    scan_ports = parse_ports(args.ports)
-    print(f"  扫描端口: {scan_ports}")
-    print(f"  运行参数: Masscan速率={MASSCAN_RATE}pps (已限速保护光猫) | API精筛并发={API_CONCURRENT} | 测速线程={SPEEDTEST_THREADS}")
-
-    do_speedtest = args.speedtest
-    if not do_speedtest and not sys.argv[1:]:
+    # 2. 确认扫描端口（交互强化）
+    raw_port = args.ports
+    default_ports = get_default_ports()
+    if not raw_port:
         try:
-            choice = input("\n  是否启动并发测速？(y/N): ").strip().lower()
-            do_speedtest = choice == "y"
+            user_port = input(f"  输入需要扫描的端口 [回车默认使用: {default_ports}]: ").strip()
+            raw_port = user_port if user_port else default_ports
+        except (EOFError, KeyboardInterrupt):
+            raw_port = default_ports
+
+    scan_ports = parse_ports(raw_port)
+    print(f"  确定扫描端口: {scan_ports}")
+
+    # 3. 确认是否测速（交互强化）
+    do_speedtest = args.speedtest
+    if not do_speedtest:
+        try:
+            choice = input("  是否在精筛后自动启动测速？(y/N, 默认 N): ").strip().lower()
+            do_speedtest = (choice == "y")
         except (EOFError, KeyboardInterrupt):
             do_speedtest = False
 
+    print(f"  运行配置: Masscan速率={MASSCAN_RATE}pps (光猫安全模式) | API精筛并发={API_CONCURRENT} | 测速模式={'开启' if do_speedtest else '跳过'}")
+
+    # 执行流程
     try:
         print("\n  [1/5 提取 ASN CIDR 前缀]")
         fetch_prefixes(asns)
