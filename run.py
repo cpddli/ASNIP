@@ -33,9 +33,9 @@ TG_CHAT_ID = ""
 
 # ── 家用光猫与 N100 优化参数配置 ──
 MASSCAN_RATE = 3000      # 限制在 3000 pps，保护家用光猫 NAT 连接表不崩溃/不丢包
-CF_SCANNER_CONC = 120    # N100 多核处理能力
+CF_SCANNER_CONC = 64    # 多核处理能力
 API_CONCURRENT = 32      # API 并发精筛
-API_CHUNK = 5000         # 16GB 大内存 Chunk 优化
+API_CHUNK = 3000         # 16GB 大内存 Chunk 优化
 SPEEDTEST_THREADS = 16   # 多线程并发测速
 
 
