@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-cf-ip-scanner — ASN IP 提取、Masscan 扫描与 Cloudflare 节点精筛 (N100 优化版)
+cf-ip-scanner — ASN IP 提取、Masscan 扫描与 Cloudflare 节点精筛
 用法: python3 run.py AS209242 [AS3214 ...] [-p 80,443] [-s]
 """
 
