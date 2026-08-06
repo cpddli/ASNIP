@@ -214,7 +214,7 @@ print(f"  硬件: {CPU_CORES}核 {RAM_MB}MB → masscan {MASSCAN_RATE}pps cf-sca
 BASE       = Path(__file__).parent.resolve()
 CF_SCANNER = BASE / "cf-scanner"
 VERIFY_PY  = BASE / "verify.py"
-API_URL    = "https://cfapi.250887.xyz/check"
+API_URL    = "https://api.090227.xyz/check"
 
 if CF_SCANNER.is_file():
     CF_SCANNER.chmod(0o755)
