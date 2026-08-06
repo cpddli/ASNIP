@@ -22,7 +22,7 @@ BASE = Path(__file__).parent.resolve()
 CF_SCANNER = BASE / "cf-scanner"
 VERIFY_PY = BASE / "verify.py"
 CONFIG_FILE = BASE / "tg_config.json"
-API_URL = "https://api.090227.xyz/check"
+API_URL = "https://cfapi.250887.xyz/check"
 HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64; cf-ip-scanner/3.0)"}
 
 # ── 默认 Telegram 配置 (可被动态配置覆盖) ──
