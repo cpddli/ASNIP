@@ -25,6 +25,34 @@ CONFIG_FILE = BASE / "tg_config.json"
 API_URL = "https://cfapi.250887.xyz/check"
 HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64; cf-ip-scanner/3.0)"}
 
+# ── 常见 Cloudflare 数据中心 (Colo) 矫正映射表 ──
+COLO_MAP = {
+    "LHR": ("GB", "London"),
+    "SJC": ("US", "San Jose"),
+    "LAX": ("US", "Los Angeles"),
+    "HKG": ("HK", "Hong Kong"),
+    "NRT": ("JP", "Tokyo"),
+    "KIX": ("JP", "Osaka"),
+    "SIN": ("SG", "Singapore"),
+    "ICN": ("KR", "Seoul"),
+    "TPE": ("TW", "Taipei"),
+    "FRA": ("DE", "Frankfurt"),
+    "AMS": ("NL", "Amsterdam"),
+    "CDG": ("FR", "Paris"),
+    "SYD": ("AU", "Sydney"),
+    "SEA": ("US", "Seattle"),
+    "ORD": ("US", "Chicago"),
+    "EWR": ("US", "Newark"),
+    "IAD": ("US", "Ashburn"),
+    "MUC": ("DE", "Munich"),
+    "ZRH": ("CH", "Zurich"),
+    "VIE": ("AT", "Vienna"),
+    "MXP": ("IT", "Milan"),
+    "MAD": ("ES", "Madrid"),
+    "LHR": ("GB", "London"),
+    "MAN": ("GB", "Manchester"),
+}
+
 # ── 默认 Telegram 配置 (可被动态配置覆盖) ──
 TG_ENABLE = False
 TG_API_HOST = "https://tg.250887.xyz"
@@ -33,7 +61,7 @@ TG_CHAT_ID = ""
 
 # ── 家用光猫与 N100 优化参数配置 ──
 MASSCAN_RATE = 3000      # 限制在 3000 pps，保护家用光猫 NAT 连接表不崩溃/不丢包
-CF_SCANNER_CONC = 64    # 多核处理能力
+CF_SCANNER_CONC = 64     # 多核处理能力
 API_CONCURRENT = 32      # API 并发精筛
 API_CHUNK = 3000         # 16GB 大内存 Chunk 优化
 SPEEDTEST_THREADS = 16   # 多线程并发测速
@@ -383,6 +411,19 @@ def api_verify():
     return passed
 
 
+# ── 纠正 API 返回错乱的地区和城市字段 ──
+def fix_colo_location(line_str):
+    parts = line_str.split(",")
+    if len(parts) >= 6:
+        colo = parts[3].strip().upper()
+        if colo in COLO_MAP:
+            country, city = COLO_MAP[colo]
+            parts[4] = country
+            parts[5] = city
+            return ",".join(parts)
+    return line_str
+
+
 # ── 单节点测速任务（多线程） ──
 def _test_node(entry):
     parts = entry.split(",")
@@ -550,6 +591,8 @@ def output_csv(asns):
         for line in f:
             line = line.strip()
             if line and not line.startswith("#") and not line.startswith("IP地址") and line.count(",") >= 7:
+                # 导出时对 location 进行矫正
+                line = fix_colo_location(line)
                 valid_lines.append(line)
 
     with open(output, "w") as f:
