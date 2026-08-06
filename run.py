@@ -1,9 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-cf-ip-scanner — ASN IP 提取、Masscan 扫描与 Cloudflare 节点精筛
+cf-ip-scanner — ASN IP 提取、Masscan 扫描与 Cloudflare 节点精筛 (N100 优化版)
 用法: python3 run.py AS209242 [AS3214 ...] [-p 80,443] [-s]
 """
+# ── Telegram通知配置 ──
+
+TG_ENABLE = True
+
+# Telegram API代理地址
+TG_API_HOST = "https://tg.250887.xyz"
+
+# Bot Token
+TG_BOT_TOKEN = "7580123422:AAHMqV-IsSL_wnwpzqsHP51XuI34kOU59Xo"
+
+# 接收人的ID
+TG_CHAT_ID = "6682393086"
 
 import argparse
 import json
@@ -386,7 +398,149 @@ def speed_test():
         for res in results:
             f.write(res + "\n")
 
+# ── Telegram发送CSV文件 ──
+def send_telegram_file(file_path):
 
+    if not TG_ENABLE:
+        return
+
+
+    if not os.path.exists(file_path):
+        print("  TG失败: 文件不存在")
+        return
+
+
+    try:
+
+        import mimetypes
+        import uuid
+
+
+        url = (
+            f"{TG_API_HOST}/bot"
+            f"{TG_BOT_TOKEN}/sendDocument"
+        )
+
+
+        boundary = "----Boundary" + uuid.uuid4().hex
+
+
+        def add_field(name, value):
+
+            return (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+                f"{value}\r\n"
+            ).encode()
+
+
+
+        body = b""
+
+
+        # chat_id
+
+        body += add_field(
+            "chat_id",
+            TG_CHAT_ID
+        )
+
+
+        # 描述信息
+
+        caption = (
+            "✅ Cloudflare IP扫描完成\n"
+            f"文件: {Path(file_path).name}\n"
+            f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+
+
+        body += add_field(
+            "caption",
+            caption
+        )
+
+
+        # 文件
+
+        filename = os.path.basename(file_path)
+
+
+        body += (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; '
+            f'name="document"; filename="{filename}"\r\n'
+            f"Content-Type: application/octet-stream\r\n\r\n"
+        ).encode()
+
+
+
+        with open(file_path,"rb") as f:
+            body += f.read()
+
+
+
+        body += (
+            f"\r\n--{boundary}--\r\n"
+        ).encode()
+
+
+
+        req = urllib.request.Request(
+            url,
+            data=body,
+            method="POST"
+        )
+
+
+        req.add_header(
+            "Content-Type",
+            f"multipart/form-data; boundary={boundary}"
+        )
+
+
+        req.add_header(
+            "Content-Length",
+            str(len(body))
+        )
+
+
+        req.add_header(
+            "User-Agent",
+            "cf-ip-scanner"
+        )
+
+
+        with urllib.request.urlopen(
+            req,
+            timeout=120
+        ) as response:
+
+
+            result = response.read().decode()
+
+
+
+        print(
+            "TG返回:",
+            result
+        )
+
+
+        if '"ok":true' in result:
+
+            print(
+                "📩 TG发送成功"
+            )
+
+
+
+    except Exception as e:
+
+        print(
+            f"❌ TG发送失败: {e}"
+        )
+        
 # ── Step 6: 导出 CSV 与 HTTP 下载 ──
 def output_csv(asns):
     verified_file = BASE / "verified.txt"
@@ -411,6 +565,7 @@ def output_csv(asns):
             f.write(line + "\n")
 
     print(f"\n  扫描完成！写入结果: {len(valid_lines)} 条 → {output.name}")
+    send_telegram_file(output)
 
     lan_ip = get_lan_ip()
     port = 8899
