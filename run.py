@@ -4,18 +4,6 @@
 cf-ip-scanner — ASN IP 提取、Masscan 扫描与 Cloudflare 节点精筛 (N100 优化版)
 用法: python3 run.py AS209242 [AS3214 ...] [-p 80,443] [-s]
 """
-# ── Telegram通知配置 ──
-
-TG_ENABLE = True
-
-# Telegram API代理地址
-TG_API_HOST = "https://tg.250887.xyz"
-
-# Bot Token
-TG_BOT_TOKEN = "7580123422:AAHMqV-IsSL_wnwpzqsHP51XuI34kOU59Xo"
-
-# 接收人的ID
-TG_CHAT_ID = "6682393086"
 
 import argparse
 import json
@@ -33,8 +21,15 @@ from pathlib import Path
 BASE = Path(__file__).parent.resolve()
 CF_SCANNER = BASE / "cf-scanner"
 VERIFY_PY = BASE / "verify.py"
+CONFIG_FILE = BASE / "tg_config.json"
 API_URL = "https://api.090227.xyz/check"
 HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64; cf-ip-scanner/3.0)"}
+
+# ── 默认 Telegram 配置 (可被动态配置覆盖) ──
+TG_ENABLE = False
+TG_API_HOST = "https://tg.250887.xyz"
+TG_BOT_TOKEN = ""
+TG_CHAT_ID = ""
 
 # ── 家用光猫与 N100 优化参数配置 ──
 MASSCAN_RATE = 3000      # 限制在 3000 pps，保护家用光猫 NAT 连接表不崩溃/不丢包
@@ -42,6 +37,75 @@ CF_SCANNER_CONC = 120    # N100 多核处理能力
 API_CONCURRENT = 32      # API 并发精筛
 API_CHUNK = 5000         # 16GB 大内存 Chunk 优化
 SPEEDTEST_THREADS = 16   # 多线程并发测速
+
+
+def safe_input(prompt_text):
+    """即使在一键安装脚本或无 TTY 管道环境中，也能强行读取键盘输入"""
+    if not sys.stdin.isatty():
+        try:
+            with open('/dev/tty', 'r') as tty:
+                print(prompt_text, end='', flush=True)
+                return tty.readline().strip()
+        except Exception:
+            return ""
+    else:
+        try:
+            return input(prompt_text).strip()
+        except (EOFError, KeyboardInterrupt):
+            return ""
+
+
+# ── 动态加载与交互式配置 Telegram ──
+def init_tg_config():
+    global TG_ENABLE, TG_BOT_TOKEN, TG_CHAT_ID, TG_API_HOST
+
+    # 1. 如果存在配置文件，优先读取
+    if CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+                TG_ENABLE = cfg.get("enable", False)
+                TG_BOT_TOKEN = cfg.get("bot_token", "")
+                TG_CHAT_ID = cfg.get("chat_id", "")
+                TG_API_HOST = cfg.get("api_host", TG_API_HOST)
+                if TG_ENABLE and TG_BOT_TOKEN and TG_CHAT_ID:
+                    print("  [TG通知] 已加载本地 Telegram 配置 (已启用)")
+                    return
+        except Exception as e:
+            print(f"  ⚠️ 读取 TG 配置文件失败: {e}")
+
+    # 2. 如果没有配置，交互式询问用户
+    print("\n  📢 [Telegram 通知设置]")
+    token_input = safe_input("  请输入 Telegram Bot Token [回车跳过/禁用TG通知]: ")
+
+    if not token_input:
+        print("  ⏩ 已跳过 Telegram 通知配置 (已禁用)")
+        TG_ENABLE = False
+        save_data = {"enable": False, "bot_token": "", "chat_id": "", "api_host": TG_API_HOST}
+    else:
+        chat_id_input = safe_input("  请输入 Telegram Chat ID: ")
+        if chat_id_input:
+            TG_ENABLE = True
+            TG_BOT_TOKEN = token_input
+            TG_CHAT_ID = chat_id_input
+            print("  ✅ Telegram 通知配置成功并已启用！")
+            save_data = {
+                "enable": True,
+                "bot_token": TG_BOT_TOKEN,
+                "chat_id": TG_CHAT_ID,
+                "api_host": TG_API_HOST
+            }
+        else:
+            print("  ⚠️ Chat ID 为空，已自动禁用 TG 通知")
+            TG_ENABLE = False
+            save_data = {"enable": False, "bot_token": "", "chat_id": "", "api_host": TG_API_HOST}
+
+    # 保存配置到配置文件
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(save_data, f, indent=4, ensure_ascii=False)
+    except Exception as e:
+        print(f"  ⚠️ 保存配置文件失败: {e}")
 
 
 def get_public_ip():
@@ -398,149 +462,67 @@ def speed_test():
         for res in results:
             f.write(res + "\n")
 
+
 # ── Telegram发送CSV文件 ──
 def send_telegram_file(file_path):
-
-    if not TG_ENABLE:
+    if not TG_ENABLE or not TG_BOT_TOKEN or not TG_CHAT_ID:
         return
-
 
     if not os.path.exists(file_path):
         print("  TG失败: 文件不存在")
         return
 
-
     try:
-
-        import mimetypes
         import uuid
 
-
-        url = (
-            f"{TG_API_HOST}/bot"
-            f"{TG_BOT_TOKEN}/sendDocument"
-        )
-
-
+        url = f"{TG_API_HOST}/bot{TG_BOT_TOKEN}/sendDocument"
         boundary = "----Boundary" + uuid.uuid4().hex
 
-
         def add_field(name, value):
-
             return (
                 f"--{boundary}\r\n"
                 f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
                 f"{value}\r\n"
             ).encode()
 
-
-
         body = b""
-
-
-        # chat_id
-
-        body += add_field(
-            "chat_id",
-            TG_CHAT_ID
-        )
-
-
-        # 描述信息
+        body += add_field("chat_id", TG_CHAT_ID)
 
         caption = (
             "✅ Cloudflare IP扫描完成\n"
             f"文件: {Path(file_path).name}\n"
             f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
-
-
-        body += add_field(
-            "caption",
-            caption
-        )
-
-
-        # 文件
+        body += add_field("caption", caption)
 
         filename = os.path.basename(file_path)
-
-
         body += (
             f"--{boundary}\r\n"
-            f'Content-Disposition: form-data; '
-            f'name="document"; filename="{filename}"\r\n'
+            f'Content-Disposition: form-data; name="document"; filename="{filename}"\r\n'
             f"Content-Type: application/octet-stream\r\n\r\n"
         ).encode()
 
-
-
-        with open(file_path,"rb") as f:
+        with open(file_path, "rb") as f:
             body += f.read()
 
+        body += f"\r\n--{boundary}--\r\n".encode()
 
+        req = urllib.request.Request(url, data=body, method="POST")
+        req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+        req.add_header("Content-Length", str(len(body)))
+        req.add_header("User-Agent", "cf-ip-scanner")
 
-        body += (
-            f"\r\n--{boundary}--\r\n"
-        ).encode()
-
-
-
-        req = urllib.request.Request(
-            url,
-            data=body,
-            method="POST"
-        )
-
-
-        req.add_header(
-            "Content-Type",
-            f"multipart/form-data; boundary={boundary}"
-        )
-
-
-        req.add_header(
-            "Content-Length",
-            str(len(body))
-        )
-
-
-        req.add_header(
-            "User-Agent",
-            "cf-ip-scanner"
-        )
-
-
-        with urllib.request.urlopen(
-            req,
-            timeout=120
-        ) as response:
-
-
+        with urllib.request.urlopen(req, timeout=120) as response:
             result = response.read().decode()
 
-
-
-        print(
-            "TG返回:",
-            result
-        )
-
-
+        print("TG返回:", result)
         if '"ok":true' in result:
-
-            print(
-                "📩 TG发送成功"
-            )
-
-
+            print("📩 TG发送成功")
 
     except Exception as e:
+        print(f"❌ TG发送失败: {e}")
 
-        print(
-            f"❌ TG发送失败: {e}"
-        )
-        
+
 # ── Step 6: 导出 CSV 与 HTTP 下载 ──
 def output_csv(asns):
     verified_file = BASE / "verified.txt"
@@ -604,22 +586,6 @@ def output_csv(asns):
             http_server.wait()
 
 
-def safe_input(prompt_text):
-    """即使在一键安装脚本或无 TTY 管道环境中，也能强行读取键盘输入"""
-    if not sys.stdin.isatty():
-        try:
-            with open('/dev/tty', 'r') as tty:
-                print(prompt_text, end='', flush=True)
-                return tty.readline().strip()
-        except Exception:
-            return ""
-    else:
-        try:
-            return input(prompt_text).strip()
-        except (EOFError, KeyboardInterrupt):
-            return ""
-
-
 # ── Main ──
 def main():
     parser = argparse.ArgumentParser(description="Cloudflare IP Scanner - N100 优化版")
@@ -628,6 +594,9 @@ def main():
     parser.add_argument("-s", "--speedtest", action="store_true", help="自动启动测速")
 
     args = parser.parse_args()
+
+    # 初始化并检查 TG 配置
+    init_tg_config()
 
     # 1. 确认 ASN (兼容一键安装脚本)
     raw_asns = args.asns
