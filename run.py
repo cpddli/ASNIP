@@ -41,7 +41,7 @@ def get_public_ip():
     for url in apis:
         try:
             req = urllib.request.Request(url, headers=HEADERS)
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with urllib.request.urlopen(req, timeout=12) as resp:
                 ip = resp.read().decode("utf-8").strip()
                 if ip and "." in ip:
                     return ip
@@ -125,7 +125,7 @@ def fetch_prefixes(asns):
     return cidr_list
 
 
-# ── 端口解析 ──
+# ── 端口读取与校验 ──
 def get_default_ports():
     ports_file = BASE / "ports.txt"
     if not ports_file.exists():
@@ -458,6 +458,7 @@ def main():
 
     args = parser.parse_args()
 
+    # 1. 确认 ASN
     raw_asns = args.asns
     if not raw_asns:
         try:
@@ -475,18 +476,31 @@ def main():
     print(f"\n  目标 ASN: {', '.join(f'AS{a}' for a in asns)}")
     detect_isp()
 
-    scan_ports = parse_ports(args.ports)
-    print(f"  扫描端口: {scan_ports}")
-    print(f"  运行参数: Masscan速率={MASSCAN_RATE}pps (已限速保护光猫) | API精筛并发={API_CONCURRENT} | 测速线程={SPEEDTEST_THREADS}")
-
-    do_speedtest = args.speedtest
-    if not do_speedtest and not sys.argv[1:]:
+    # 2. 确认扫描端口（交互强化）
+    raw_port = args.ports
+    default_ports = get_default_ports()
+    if not raw_port:
         try:
-            choice = input("\n  是否启动并发测速？(y/N): ").strip().lower()
-            do_speedtest = choice == "y"
+            user_port = input(f"  输入需要扫描的端口 [回车默认使用: {default_ports}]: ").strip()
+            raw_port = user_port if user_port else default_ports
+        except (EOFError, KeyboardInterrupt):
+            raw_port = default_ports
+
+    scan_ports = parse_ports(raw_port)
+    print(f"  确定扫描端口: {scan_ports}")
+
+    # 3. 确认是否测速（交互强化）
+    do_speedtest = args.speedtest
+    if not do_speedtest:
+        try:
+            choice = input("  是否在精筛后自动启动测速？(y/N, 默认 N): ").strip().lower()
+            do_speedtest = (choice == "y")
         except (EOFError, KeyboardInterrupt):
             do_speedtest = False
 
+    print(f"  运行配置: Masscan速率={MASSCAN_RATE}pps (光猫安全模式) | API精筛并发={API_CONCURRENT} | 测速模式={'开启' if do_speedtest else '跳过'}")
+
+    # 执行流程
     try:
         print("\n  [1/5 提取 ASN CIDR 前缀]")
         fetch_prefixes(asns)
