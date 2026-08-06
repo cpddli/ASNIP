@@ -4,9 +4,10 @@
 cf-ip-scanner — 从 ASN 拉取 IP，masscan 扫描，检测 Cloudflare 反代节点
 用法: python3 run.py AS209242 [AS3214 ...]
 """
-import sys, os, subprocess, json, urllib.request, multiprocessing, socket, time, re
+import sys, os, subprocess, json, urllib.request, multiprocessing, socket, time, re, threading
 from pathlib import Path
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ── 自适应硬件检测 ──
 def detect_hardware():
@@ -240,24 +241,6 @@ def fetch_prefixes(asns):
     print(f"  共 {len(cidrs)} 个 CIDR")
     return cidrs
 
-# ── Step 2: CIDR → IP ──
-def expand_ips():
-    ip_file = BASE / "ips.txt"
-    total = 0
-    with open(ip_file, "w") as out:
-        with open(BASE / "cidrs.txt") as f:
-            for cidr in f:
-                cidr = cidr.strip()
-                if not cidr:
-                    continue
-                proc = subprocess.Popen(["prips", cidr], stdout=subprocess.PIPE, text=True, bufsize=1)
-                for ip in proc.stdout:
-                    out.write(ip)
-                    total += 1
-                proc.wait()
-    print(f"  展开 {total:,} 个 IP")
-    return total
-
 # ── 端口解析 ──
 with open(BASE / "ports.txt") as f:
     _default_ports = [l.strip() for l in f if l.strip() and not l.startswith("#")]
@@ -394,7 +377,7 @@ def cf_scan():
     print(f"  CF 节点: {hits}")
     return hits
 
-# ── Step 5: API 精筛（优化版：提升并发 + 显示实时进度） ──
+# ── Step 5: API 精筛 ──
 def api_verify():
     hits_file = BASE / "cf_hits.txt"
     verified_file = BASE / "verified.txt"
@@ -403,13 +386,11 @@ def api_verify():
         print("  无 CF 节点，跳过")
         return 0
 
-    # API 验证不影响光猫连接表，将并发适当提升至 16
     api_conc = max(API_CONCURRENT, 16)
-
     print(f"  正在请求 API 精筛 (并发: {api_conc})...")
     
     proc = subprocess.Popen([
-        "python3", "-u", str(VERIFY_PY),  # 添加 -u 参数禁止 Python 缓冲输出
+        "python3", "-u", str(VERIFY_PY),
         "--input", str(hits_file),
         "--output", str(verified_file),
         "--api", API_URL,
@@ -417,7 +398,6 @@ def api_verify():
         "--concurrent", str(api_conc)
     ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
 
-    # 实时刷新 verify.py 的输出，避免终端界面卡住
     for line in proc.stdout:
         sys.stdout.write("  " + line)
         sys.stdout.flush()
@@ -427,7 +407,7 @@ def api_verify():
     print(f"  精筛完成，通过节点: {passed}")
     return passed
 
-# ── Step 6: 测速 ──
+# ── Step 6: 多线程测速 (终极修正版) ──
 def speed_test():
     verified_file = BASE / "verified.txt"
     if not verified_file.exists() or verified_file.stat().st_size == 0:
@@ -438,72 +418,85 @@ def speed_test():
     with open(verified_file) as f:
         for line in f:
             line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if line.startswith("IP地址"):
-                lines.append(line)
+            if not line or line.startswith("#") or line.startswith("IP地址"):
                 continue
             lines.append(line)
 
-    if len(lines) <= 1:
+    total = len(lines)
+    if total == 0:
         print("  无节点，跳过")
         return
 
-    header = lines[0]
-    entries = lines[1:]
-    total = len(entries)
+    print(f"  节点数: {total} (启动多线程并发测速中...)")
+
+    results = []
     tested = 0
+    lock = threading.Lock()
 
-    print(f"  节点数: {total}")
+    def _test_single(entry):
+        parts = entry.split(",")
+        if len(parts) < 7:
+            return None
+        ip, port = parts[0], parts[1]
 
-    with open(verified_file, "w") as f:
-        f.write(header + "\n")
-        for entry in entries:
-            parts = entry.split(",")
-            if len(parts) < 9:
-                continue
-            ip, port = parts[0], parts[1]
+        latency = 0
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(5)
+            t0 = time.time()
+            s.connect((ip, int(port)))
+            latency = round((time.time() - t0) * 1000)
+            s.close()
+        except:
+            pass
 
-            latency = 0
+        speed_mbps = 0
+        if latency > 0:
             try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(5)
-                t0 = time.time()
-                s.connect((ip, int(port)))
-                latency = round((time.time() - t0) * 1000)
-                s.close()
+                r = subprocess.run([
+                    "curl", "--connect-to", f"speed.cloudflare.com:443:{ip}:{port}",
+                    "-o", "/dev/null", "-s", "-w", "%{speed_download}",
+                    "--connect-timeout", "5", "--max-time", "20",
+                    "https://speed.cloudflare.com/__down?bytes=10485760"
+                ], capture_output=True, text=True, timeout=25)
+                speed_bps = float(r.stdout.strip() or 0)
+                speed_mbps = round(speed_bps * 8 / 1000000, 2)
             except:
                 pass
 
-            speed_mbps = 0
-            if latency > 0:
-                try:
-                    r = subprocess.run([
-                        "curl", "--connect-to", f"speed.cloudflare.com:443:{ip}:{port}",
-                        "-o", "/dev/null", "-s", "-w", "%{speed_download}",
-                        "--connect-timeout", "5", "--max-time", "20",
-                        "https://speed.cloudflare.com/__down?bytes=10485760"
-                    ], capture_output=True, text=True, timeout=25)
-                    speed_bps = float(r.stdout.strip() or 0)
-                    speed_mbps = round(speed_bps * 8 / 1000000, 2)
-                except:
-                    pass
-
+        # 核心修正：严格按照列数插入或替换
+        if len(parts) == 7:
+            return f"{parts[0]},{parts[1]},{parts[2]},{parts[3]},{parts[4]},{parts[5]},{latency},{speed_mbps},{parts[6]}"
+        elif len(parts) >= 9:
             parts[6] = str(latency)
             parts[7] = str(speed_mbps)
-            f.write(",".join(parts) + "\n")
+            return ",".join(parts)
+        return None
 
-            tested += 1
-            pct = tested / total * 100
-            bar_width = 30
-            filled = int(bar_width * pct / 100)
-            bar = "█" * filled + "░" * (bar_width - filled)
-            sys.stderr.write(f"\r  [{bar}] {pct:.1f}% | 延迟 {latency}ms  {speed_mbps}Mbps  {'':20}")
-            sys.stderr.flush()
+    # 多线程并发测速
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        futures = {executor.submit(_test_single, line): line for line in lines}
+        for future in as_completed(futures):
+            res = future.result()
+            if res:
+                results.append(res)
+            
+            with lock:
+                tested += 1
+                pct = tested / total * 100
+                bar_width = 30
+                filled = int(bar_width * pct / 100)
+                bar = "█" * filled + "░" * (bar_width - filled)
+                sys.stderr.write(f"\r  [{bar}] {pct:.1f}% | 进度: {tested}/{total} {'':15}")
+                sys.stderr.flush()
 
-    sys.stderr.write(f"\r  [{'█' * 30}] 100.0% | 测速完成: {total} 个节点{'':20}\n")
+    sys.stderr.write(f"\r  [{'█' * 30}] 100.0% | 测速完成: {total} 个节点{'':15}\n")
+    
+    with open(verified_file, "w") as f:
+        f.write("IP地址,端口,TLS,数据中心,地区,城市,网络延迟,下载速度,ASN\n")
+        f.write("\n".join(results) + "\n")
 
-# ── 输出 + 下载链接 ──
+# ── 输出 + 下载链接 (彻底兼容未测速状态) ──
 def output_csv(asns):
     verified_file = BASE / "verified.txt"
     if not verified_file.exists() or verified_file.stat().st_size == 0:
@@ -520,6 +513,12 @@ def output_csv(asns):
             line = line.strip()
             if not line or line.startswith("#") or line.startswith("IP地址"):
                 continue
+            
+            parts = line.split(",")
+            # 核心修正：如果用户跳过测速，文本中只有 7 列，这里自动补全延迟和速度为 0
+            if len(parts) == 7:
+                line = f"{parts[0]},{parts[1]},{parts[2]},{parts[3]},{parts[4]},{parts[5]},0,0,{parts[6]}"
+            
             if line.count(",") >= 8:
                 lines.append(line)
 
