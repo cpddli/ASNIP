@@ -14,7 +14,7 @@ curl -fsSL https://github.250887.xyz/https://raw.githubusercontent.com/cpddli/AS
 ## 卸载
 
 ```bash
-curl -fsSL https://github.250887.xyz/https://raw.githubusercontent.com/cpddli/ASNIPtest/main/uninstall.sh | bash
+cmtjd uninstall
 ```
 
 这会删除 `cmtjd` 命令和 `~/ASNIPtest` 目录。
