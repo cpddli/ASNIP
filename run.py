@@ -458,13 +458,20 @@ def main():
 
     args = parser.parse_args()
 
-    # 1. 确认 ASN
+    # 1. 确认 ASN (增强非交互环境兼容性)
     raw_asns = args.asns
     if not raw_asns:
+        # 检测当前系统是否支持交互
+        if not sys.stdin.isatty():
+            print("  ❌ 错误: 未检测到交互式终端 (TTY)。")
+            print("  👉 请直接附带参数运行，例如: cmtjd AS209242")
+            sys.exit(1)
+
         try:
             user_input = input("  输入 ASN 编号 (多个用逗号分隔): ").strip()
             raw_asns = [a.strip() for a in user_input.replace("，", ",").split(",") if a.strip()]
         except (EOFError, KeyboardInterrupt):
+            print("\n  操作已取消")
             sys.exit(0)
 
     asns = [a.upper().replace("AS", "") for a in raw_asns if a.upper().replace("AS", "").isdigit()]
