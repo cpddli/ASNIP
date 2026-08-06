@@ -39,6 +39,15 @@ API_CHUNK = 5000         # 16GB 大内存 Chunk 优化
 SPEEDTEST_THREADS = 16   # 多线程并发测速
 
 
+def flush_stdin():
+    """清空终端标准输入缓冲区中的残余换行符，防止 input() 自动跳过"""
+    try:
+        import termios
+        termios.tcflush(sys.stdin, termios.TCIFLUSH)
+    except Exception:
+        pass
+
+
 def safe_input(prompt_text):
     """即使在一键安装脚本或无 TTY 管道环境中，也能强行读取键盘输入"""
     if not sys.stdin.isatty():
@@ -481,9 +490,10 @@ def send_telegram_file(file_path):
         def add_field(name, value):
             return (
                 f"--{boundary}\r\n"
-                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+                f'Content-Disposition: form-data; name="{name}"\r\n'
+                f'Content-Type: text/plain; charset=utf-8\r\n\r\n'
                 f"{value}\r\n"
-            ).encode()
+            ).encode("utf-8")
 
         body = b""
         body += add_field("chat_id", TG_CHAT_ID)
@@ -500,12 +510,12 @@ def send_telegram_file(file_path):
             f"--{boundary}\r\n"
             f'Content-Disposition: form-data; name="document"; filename="{filename}"\r\n'
             f"Content-Type: application/octet-stream\r\n\r\n"
-        ).encode()
+        ).encode("utf-8")
 
         with open(file_path, "rb") as f:
             body += f.read()
 
-        body += f"\r\n--{boundary}--\r\n".encode()
+        body += f"\r\n--{boundary}--\r\n".encode("utf-8")
 
         req = urllib.request.Request(url, data=body, method="POST")
         req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
@@ -513,11 +523,12 @@ def send_telegram_file(file_path):
         req.add_header("User-Agent", "cf-ip-scanner")
 
         with urllib.request.urlopen(req, timeout=120) as response:
-            result = response.read().decode()
+            result = response.read().decode("utf-8")
 
-        print("TG返回:", result)
         if '"ok":true' in result:
             print("📩 TG发送成功")
+        else:
+            print("TG返回异常:", result)
 
     except Exception as e:
         print(f"❌ TG发送失败: {e}")
@@ -577,7 +588,10 @@ def output_csv(asns):
             [sys.executable, "-m", "http.server", str(port), "--directory", str(BASE)],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
-        input()
+        
+        # 清空残余输入缓冲区，保证阻塞等待用户按 Enter 键
+        flush_stdin()
+        safe_input("")
     except (EOFError, KeyboardInterrupt):
         pass
     finally:
