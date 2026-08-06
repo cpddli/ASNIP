@@ -449,6 +449,22 @@ def output_csv(asns):
             http_server.wait()
 
 
+def safe_input(prompt_text):
+    """即使在一键安装脚本或无 TTY 管道环境中，也能强行读取键盘输入"""
+    if not sys.stdin.isatty():
+        try:
+            with open('/dev/tty', 'r') as tty:
+                print(prompt_text, end='', flush=True)
+                return tty.readline().strip()
+        except Exception:
+            return ""
+    else:
+        try:
+            return input(prompt_text).strip()
+        except (EOFError, KeyboardInterrupt):
+            return ""
+
+
 # ── Main ──
 def main():
     parser = argparse.ArgumentParser(description="Cloudflare IP Scanner - N100 优化版")
@@ -458,21 +474,11 @@ def main():
 
     args = parser.parse_args()
 
-    # 1. 确认 ASN (增强非交互环境兼容性)
+    # 1. 确认 ASN (兼容一键安装脚本)
     raw_asns = args.asns
     if not raw_asns:
-        # 检测当前系统是否支持交互
-        if not sys.stdin.isatty():
-            print("  ❌ 错误: 未检测到交互式终端 (TTY)。")
-            print("  👉 请直接附带参数运行，例如: cmtjd AS209242")
-            sys.exit(1)
-
-        try:
-            user_input = input("  输入 ASN 编号 (多个用逗号分隔): ").strip()
-            raw_asns = [a.strip() for a in user_input.replace("，", ",").split(",") if a.strip()]
-        except (EOFError, KeyboardInterrupt):
-            print("\n  操作已取消")
-            sys.exit(0)
+        user_input = safe_input("  输入 ASN 编号 (多个用逗号分隔): ")
+        raw_asns = [a.strip() for a in user_input.replace("，", ",").split(",") if a.strip()]
 
     asns = [a.upper().replace("AS", "") for a in raw_asns if a.upper().replace("AS", "").isdigit()]
 
@@ -483,31 +489,25 @@ def main():
     print(f"\n  目标 ASN: {', '.join(f'AS{a}' for a in asns)}")
     detect_isp()
 
-    # 2. 确认扫描端口（交互强化）
+    # 2. 确认扫描端口
     raw_port = args.ports
     default_ports = get_default_ports()
     if not raw_port:
-        try:
-            user_port = input(f"  输入需要扫描的端口 [回车默认使用: {default_ports}]: ").strip()
-            raw_port = user_port if user_port else default_ports
-        except (EOFError, KeyboardInterrupt):
-            raw_port = default_ports
+        user_port = safe_input(f"  输入需要扫描的端口 [回车默认使用: {default_ports}]: ")
+        raw_port = user_port if user_port else default_ports
 
     scan_ports = parse_ports(raw_port)
     print(f"  确定扫描端口: {scan_ports}")
 
-    # 3. 确认是否测速（交互强化）
+    # 3. 确认是否测速
     do_speedtest = args.speedtest
     if not do_speedtest:
-        try:
-            choice = input("  是否在精筛后自动启动测速？(y/N, 默认 N): ").strip().lower()
-            do_speedtest = (choice == "y")
-        except (EOFError, KeyboardInterrupt):
-            do_speedtest = False
+        choice = safe_input("  是否在精筛后自动启动测速？(y/N, 默认 N): ").lower()
+        do_speedtest = (choice == "y")
 
     print(f"  运行配置: Masscan速率={MASSCAN_RATE}pps (光猫安全模式) | API精筛并发={API_CONCURRENT} | 测速模式={'开启' if do_speedtest else '跳过'}")
 
-    # 执行流程
+    # 执行主流程
     try:
         print("\n  [1/5 提取 ASN CIDR 前缀]")
         fetch_prefixes(asns)
