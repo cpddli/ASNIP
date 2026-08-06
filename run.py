@@ -526,7 +526,3 @@ def main():
         sys.exit(1)
 
     print("\n✓ 运行完成\n")
-
-
-if __name__ == "__main__":
-    main()
