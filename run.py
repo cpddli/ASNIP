@@ -9,108 +9,7 @@ from pathlib import Path
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# ── 自适应硬件检测 ──
-def detect_hardware():
-    cpu = multiprocessing.cpu_count()
-    try:
-        with open("/proc/meminfo") as f:
-            for line in f:
-                if "MemAvailable" in line:
-                    mem_mb = int(line.split()[1]) // 1024
-                    break
-    except:
-        mem_mb = 512
-    return cpu, mem_mb
-
-
-# ── 智能自适应 masscan 速率探测 ──
-def probe_masscan_rate():
-    """根据网络实际响应率（TX 探测比）自适应寻找最佳 pps，兼顾家用光猫与高性能 VPS"""
-    iface = None
-    try:
-        r = subprocess.run(["ip", "-4", "route", "get", "1.1.1.1"],
-                           capture_output=True, text=True, timeout=5)
-        m = __import__("re").search(r"dev\s+(\S+)", r.stdout)
-        if m:
-            iface = m.group(1)
-    except Exception:
-        pass
-    if not iface:
-        for name in ["eth0", "ens3", "enp0s3", "enp1s0", "ens5", "enp3s0"]:
-            if os.path.exists(f"/sys/class/net/{name}/statistics/tx_packets"):
-                iface = name
-                break
-    if not iface:
-        return 1000
-
-    cidrs = [a for a in sys.argv[1:] if not a.startswith("--") and "/" in a]
-    if not cidrs:
-        cidrs = ["1.1.1.0/24", "8.8.8.0/24", "9.9.9.0/24"]
-    sample = cidrs[:50]
-    tmp_cidr = "/tmp/.masscan_rate_test"
-    with open(tmp_cidr, "w") as f:
-        f.write("\n".join(sample))
-
-    best_rate = 800
-    test_rate = 1000
-    probe_sec = 4
-    ABS_LIMIT = 500000  # 高性能服务器探测上限
-
-    sys.stderr.write("  正在动态探测网络吞吐能力...")
-    sys.stderr.flush()
-
-    while test_rate <= ABS_LIMIT:
-        try:
-            with open(f"/sys/class/net/{iface}/statistics/tx_packets") as f:
-                tx_before = int(f.read().strip())
-        except Exception:
-            break
-
-        proc = subprocess.Popen(
-            ["masscan", "-iL", tmp_cidr, "-p", "443",
-             "--rate", str(test_rate), "-oX", "/dev/null"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-        time.sleep(probe_sec)
-        proc.terminate()
-        try:
-            proc.wait(timeout=2)
-        except Exception:
-            pass
-
-        try:
-            with open(f"/sys/class/net/{iface}/statistics/tx_packets") as f:
-                tx_after = int(f.read().strip())
-        except Exception:
-            break
-
-        actual_pps = (tx_after - tx_before) / probe_sec
-        ratio = actual_pps / test_rate
-
-        # 吞吐良好 (>=85%)：记录当前最佳值，按 1.5 倍继续向上探索
-        if ratio >= 0.85:
-            best_rate = int(test_rate * 0.85)
-            test_rate = int(test_rate * 1.5)
-        # 吞吐效率下降 (50% ~ 85%)：触碰光猫/网卡瓶颈，立即锁定
-        elif ratio >= 0.50:
-            best_rate = max(800, int(actual_pps * 0.80))
-            break
-        # 严重丢包 (<50%)：网络拥堵，强制回退到安全区
-        else:
-            best_rate = max(800, int(actual_pps * 0.60))
-            break
-
-    try:
-        os.remove(tmp_cidr)
-    except Exception:
-        pass
-
-    sys.stderr.write(f" 完成 (最佳速率: {best_rate} pps)\n")
-    sys.stderr.flush()
-    return max(800, best_rate)
-
-
-# ── 获取公网 IP ──
+# ── 获取公网 IP (仅在最后提供下载链接时使用，避免启动卡顿) ──
 def get_public_ip():
     apis = [
         ("https://api.ipify.org", 5),
@@ -120,7 +19,8 @@ def get_public_ip():
     ]
     for url, timeout in apis:
         try:
-            return urllib.request.urlopen(url, timeout=timeout).read().decode("utf-8").strip()
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            return urllib.request.urlopen(req, timeout=timeout).read().decode("utf-8").strip()
         except Exception:
             continue
 
@@ -139,9 +39,7 @@ def get_public_ip():
                     return out
         except Exception:
             continue
-
     return "127.0.0.1"
-
 
 # ── 获取局域网 IP ──
 def get_lan_ip():
@@ -156,61 +54,20 @@ def get_lan_ip():
         pass
     return "127.0.0.1"
 
+# ── 🌟 家用光猫安全核心配置 🌟 ──
 
-# ── 公网 IP + 运营商检测 ──
-def detect_isp():
-    ip = get_public_ip()
-    print(f"\n  本机公网 IP: {ip}")
-    if ip == "127.0.0.1":
-        print("  (无法获取公网 IP，跳过运营商检测)")
-        return ip, "", ""
-    try:
-        token = None
-        token_file = Path("/root/.ipinfo_token")
-        if token_file.is_file():
-            token = token_file.read_text().strip()
-        url = f"https://ipinfo.io/{ip}/json"
-        if token:
-            url += f"?token={token}"
-        with urllib.request.urlopen(url, timeout=10) as resp:
-            data = json.loads(resp.read())
-            country = data.get("country", "")
-            org = data.get("org", "")
-            city = data.get("city", "")
-            if country == "CN":
-                isp = org.split(" ", 1)[-1] if org else "未知"
-                print(f"  地区: {city}, {country}  🇨🇳  运营商: {isp}")
-            else:
-                isp = org
-                print(f"  地区: {city}, {country}  机构: {org}")
-            return ip, country, isp
-    except Exception as e:
-        print(f"  (无法获取详情: {e})")
-    return ip, "", ""
+# masscan：无状态 UDP 发包，1000 pps 家用路由器通常能轻松应对
+MASSCAN_RATE = 1000
 
+# cf-scanner：有状态 TCP/TLS 握手。40 并发是光猫稳定不丢包的甜点值。
+CF_SCANNER_CONC = 40
 
-# ── 1. 先获取 GLOBAL_COUNTRY 变量 ──
-GLOBAL_IP, GLOBAL_COUNTRY, GLOBAL_ISP = detect_isp()
+# API 验证并发：8 个并发短连接，保护光猫 NAT 表
+API_CONCURRENT = 8
 
-# ── 2. 自适应硬件与网络速率测速 ──
-CPU_CORES, RAM_MB = detect_hardware()
-MASSCAN_RATE    = probe_masscan_rate()
+# API 单次提交量：300。将原本几千 IP 一次性提交拆散为几百个一组。
+API_CHUNK = 300
 
-# ── 3. 根据实际测出的发包能力自适应扩缩并发 ──
-if MASSCAN_RATE > 10000:
-    CF_SCANNER_CONC = 200
-    API_CONCURRENT  = 16
-elif MASSCAN_RATE > 3000:
-    CF_SCANNER_CONC = 80
-    API_CONCURRENT  = 8
-else:
-    # 针对家用宽带/光猫的低打扰并发
-    CF_SCANNER_CONC = 30
-    API_CONCURRENT  = 4
-
-API_CHUNK = 2000 if RAM_MB < 1024 else 5000
-
-print(f"  硬件: {CPU_CORES}核 {RAM_MB}MB → masscan {MASSCAN_RATE}pps cf-scanner {CF_SCANNER_CONC}c API {API_CONCURRENT}c")
 
 BASE       = Path(__file__).parent.resolve()
 CF_SCANNER = BASE / "cf-scanner"
@@ -220,25 +77,41 @@ API_URL    = "https://api.090227.xyz/check"
 if CF_SCANNER.is_file():
     CF_SCANNER.chmod(0o755)
 
-# ── Step 1: ASN → CIDR ──
+# ── Step 1: ASN → CIDR (🌟修复网络超时bug，增加重试和拦截) ──
 def fetch_prefixes(asns):
     cidrs = []
     for asn in asns:
         url = f"https://stat.ripe.net/data/announced-prefixes/data.json?resource=AS{asn}"
-        try:
-            with urllib.request.urlopen(url, timeout=15) as resp:
-                data = json.loads(resp.read())
-                count = 0
-                for p in data["data"]["prefixes"]:
-                    if ":" not in p["prefix"]:
-                        cidrs.append(p["prefix"])
-                        count += 1
-                print(f"  AS{asn} → {count} 个 IPv4 CIDR")
-        except Exception as e:
-            print(f"  AS{asn} → 失败: {e}")
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+        success = False
+        
+        # 增加 3 次重试机制
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = json.loads(resp.read())
+                    count = 0
+                    for p in data["data"]["prefixes"]:
+                        if ":" not in p["prefix"]:
+                            cidrs.append(p["prefix"])
+                            count += 1
+                    print(f"  AS{asn} → 获取到 {count} 个 IPv4 CIDR")
+                    success = True
+                    break
+            except Exception as e:
+                print(f"  AS{asn} → 尝试 {attempt+1}/3 失败: {e}")
+                time.sleep(2) # 失败后等待 2 秒再重试
+        
+        if not success:
+            print(f"  ❌ AS{asn} → 获取失败，跳过该 ASN。")
+
+    # 拦截 0 个 CIDR 的情况，防止 masscan 崩溃
+    if not cidrs:
+        raise ValueError("拉取到的 CIDR 数量为 0，可能是网络无法连接 API 或输入了无效的 ASN 编号。程序已安全停止。")
+
     cidr_file = BASE / "cidrs.txt"
     cidr_file.write_text("\n".join(cidrs))
-    print(f"  共 {len(cidrs)} 个 CIDR")
+    print(f"  共获取 {len(cidrs)} 个 CIDR")
     return cidrs
 
 # ── 端口解析 ──
@@ -273,6 +146,10 @@ def run_masscan(ports_str=None):
         ports = DEFAULT_PORTS
     result_file = BASE / "masscan_result.txt"
     ip_file = BASE / "cidrs.txt"
+
+    # 如果运行到这里发现文件不存在或为空（双重保险），直接抛错
+    if not ip_file.exists() or ip_file.stat().st_size == 0:
+         raise ValueError("cidrs.txt 文件为空，无法启动 masscan 扫描。")
 
     if result_file.exists():
         if os.geteuid() == 0:
@@ -341,7 +218,7 @@ def cf_scan():
     new_file = BASE / "masscan_result.txt"
     hits_file = BASE / "cf_hits.txt"
 
-    if new_file.stat().st_size == 0:
+    if not new_file.exists() or new_file.stat().st_size == 0:
         print("  无开放端口，跳过")
         return 0
 
@@ -386,8 +263,7 @@ def api_verify():
         print("  无 CF 节点，跳过")
         return 0
 
-    api_conc = max(API_CONCURRENT, 16)
-    print(f"  正在请求 API 精筛 (并发: {api_conc})...")
+    print(f"  正在请求 API 精筛 (并发: {API_CONCURRENT}, 块大小: {API_CHUNK})...")
     
     proc = subprocess.Popen([
         "python3", "-u", str(VERIFY_PY),
@@ -395,7 +271,7 @@ def api_verify():
         "--output", str(verified_file),
         "--api", API_URL,
         "--chunk", str(API_CHUNK),
-        "--concurrent", str(api_conc)
+        "--concurrent", str(API_CONCURRENT)
     ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
 
     for line in proc.stdout:
@@ -407,7 +283,7 @@ def api_verify():
     print(f"  精筛完成，通过节点: {passed}")
     return passed
 
-# ── Step 6: 多线程测速 (终极修正版) ──
+# ── Step 6: 多线程测速 ──
 def speed_test():
     verified_file = BASE / "verified.txt"
     if not verified_file.exists() or verified_file.stat().st_size == 0:
@@ -427,7 +303,8 @@ def speed_test():
         print("  无节点，跳过")
         return
 
-    print(f"  节点数: {total} (启动多线程并发测速中...)")
+    SPEED_TEST_CONC = 8
+    print(f"  节点数: {total} (启动多线程并发测速中, 并发:{SPEED_TEST_CONC})")
 
     results = []
     tested = 0
@@ -464,7 +341,6 @@ def speed_test():
             except:
                 pass
 
-        # 核心修正：严格按照列数插入或替换
         if len(parts) == 7:
             return f"{parts[0]},{parts[1]},{parts[2]},{parts[3]},{parts[4]},{parts[5]},{latency},{speed_mbps},{parts[6]}"
         elif len(parts) >= 9:
@@ -473,8 +349,7 @@ def speed_test():
             return ",".join(parts)
         return None
 
-    # 多线程并发测速
-    with ThreadPoolExecutor(max_workers=16) as executor:
+    with ThreadPoolExecutor(max_workers=SPEED_TEST_CONC) as executor:
         futures = {executor.submit(_test_single, line): line for line in lines}
         for future in as_completed(futures):
             res = future.result()
@@ -515,7 +390,6 @@ def output_csv(asns):
                 continue
             
             parts = line.split(",")
-            # 核心修正：如果用户跳过测速，文本中只有 7 列，这里自动补全延迟和速度为 0
             if len(parts) == 7:
                 line = f"{parts[0]},{parts[1]},{parts[2]},{parts[3]},{parts[4]},{parts[5]},0,0,{parts[6]}"
             
@@ -602,8 +476,8 @@ if __name__ == "__main__":
                 print(f"\n  请在终端运行: cd {BASE} && python3 run.py\n")
                 sys.exit(0)
         if not raw:
-            print("用法: cmtjd AS209242")
-            print("  ssh 断线不杀: screen -S scan → cmtjd AS209242 → Ctrl+A D")
+            print("用法: python3 run.py AS209242")
+            print("  ssh 断线不杀: screen -S scan → python3 run.py AS209242 → Ctrl+A D")
             sys.exit(1)
         asns = [a.strip().replace("AS", "").replace("as", "") for a in raw.replace("，", ",").split(",") if a.strip()]
     else:
@@ -619,10 +493,12 @@ if __name__ == "__main__":
         raw = ",".join(asn_args)
         asns = [a.strip().replace("AS", "").replace("as", "") for a in raw.replace("，", ",").split(",") if a.strip()]
         if not asns:
-            print("用法: cmtjd AS209242 或 cmtjd AS209242 -p 8443")
-            print("  ssh 断线不杀: screen -S scan → cmtjd AS209242 → Ctrl+A D")
+            print("用法: python3 run.py AS209242 或 python3 run.py AS209242 -p 8443")
+            print("  ssh 断线不杀: screen -S scan → python3 run.py AS209242 → Ctrl+A D")
             sys.exit(1)
-    print(f"\n  ASN: {', '.join(f'AS{a}' for a in asns)}\n")
+    
+    print(f"\n  配置: masscan={MASSCAN_RATE}pps, cf-scanner={CF_SCANNER_CONC}c, API={API_CONCURRENT}c(块{API_CHUNK})")
+    print(f"  ASN: {', '.join(f'AS{a}' for a in asns)}\n")
 
     scan_ports = DEFAULT_PORTS
     if len(sys.argv) < 2:
@@ -665,12 +541,12 @@ if __name__ == "__main__":
         try:
             fn()
         except Exception as e:
-            print(f"  ❌ 失败: {e}")
+            print(f"  ❌ 任务提前终止: {e}")
             sys.exit(1)
 
     output_csv(asns)
     print()
     print("  ───")
-    print("  SSH 断线不杀: screen -S scan → cmtjd AS209242 → Ctrl+A D")
+    print("  SSH 断线不杀: screen -S scan → python3 run.py AS209242 → Ctrl+A D")
     print("  恢复: screen -r scan")
     print("\n✓ 完成\n")
