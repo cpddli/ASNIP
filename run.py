@@ -56,7 +56,7 @@ def get_lan_ip():
 
 # ── 🌟 家用光猫安全核心配置 🌟 ──
 
-# masscan：无状态 UDP 发包，1000 pps 家用路由器通常能轻松应对
+# masscan：无状态 UDP 发包，默认 1000 pps，现在可以通过用户输入动态修改
 MASSCAN_RATE = 1000
 
 # cf-scanner：有状态 TCP/TLS 握手。40 并发是光猫稳定不丢包的甜点值。
@@ -77,7 +77,7 @@ API_URL    = "https://api.090227.xyz/check"
 if CF_SCANNER.is_file():
     CF_SCANNER.chmod(0o755)
 
-# ── Step 1: ASN → CIDR (🌟修复网络超时bug，增加重试和拦截) ──
+# ── Step 1: ASN → CIDR ──
 def fetch_prefixes(asns):
     cidrs = []
     for asn in asns:
@@ -85,7 +85,6 @@ def fetch_prefixes(asns):
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
         success = False
         
-        # 增加 3 次重试机制
         for attempt in range(3):
             try:
                 with urllib.request.urlopen(req, timeout=10) as resp:
@@ -100,12 +99,11 @@ def fetch_prefixes(asns):
                     break
             except Exception as e:
                 print(f"  AS{asn} → 尝试 {attempt+1}/3 失败: {e}")
-                time.sleep(2) # 失败后等待 2 秒再重试
+                time.sleep(2)
         
         if not success:
             print(f"  ❌ AS{asn} → 获取失败，跳过该 ASN。")
 
-    # 拦截 0 个 CIDR 的情况，防止 masscan 崩溃
     if not cidrs:
         raise ValueError("拉取到的 CIDR 数量为 0，可能是网络无法连接 API 或输入了无效的 ASN 编号。程序已安全停止。")
 
@@ -147,7 +145,6 @@ def run_masscan(ports_str=None):
     result_file = BASE / "masscan_result.txt"
     ip_file = BASE / "cidrs.txt"
 
-    # 如果运行到这里发现文件不存在或为空（双重保险），直接抛错
     if not ip_file.exists() or ip_file.stat().st_size == 0:
          raise ValueError("cidrs.txt 文件为空，无法启动 masscan 扫描。")
 
@@ -165,6 +162,9 @@ def run_masscan(ports_str=None):
         "-oL", str(result_file),
         "--wait", "5"
     ]
+    
+    print(f"  [运行 masscan] 速率: {MASSCAN_RATE} pps, 端口: {ports}")
+    
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                             text=True, bufsize=1)
     bar_width = 30
@@ -497,6 +497,17 @@ if __name__ == "__main__":
             print("  ssh 断线不杀: screen -S scan → python3 run.py AS209242 → Ctrl+A D")
             sys.exit(1)
     
+    # ── 🌟 新增：用户自定义 PPS 速率 ──
+    try:
+        pps_input = input("  设置 masscan 扫描速率 PPS (回车默认 1000): ").strip()
+        if pps_input:
+            if pps_input.isdigit() and int(pps_input) > 0:
+                MASSCAN_RATE = int(pps_input)
+            else:
+                print("  ⚠️ 输入无效，使用默认速率 1000 pps")
+    except (EOFError, KeyboardInterrupt):
+        pass
+
     print(f"\n  配置: masscan={MASSCAN_RATE}pps, cf-scanner={CF_SCANNER_CONC}c, API={API_CONCURRENT}c(块{API_CHUNK})")
     print(f"  ASN: {', '.join(f'AS{a}' for a in asns)}\n")
 
