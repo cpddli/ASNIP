@@ -4,7 +4,7 @@
 cf-ip-scanner — 从 ASN 拉取 IP，masscan 扫描，检测 Cloudflare 反代节点
 用法: python3 run.py AS209242 [AS3214 ...]
 """
-import sys, os, subprocess, json, urllib.request, multiprocessing, socket, time, re, threading
+import sys, os, subprocess, json, urllib.request, multiprocessing, socket, time, re, threading, uuid
 from pathlib import Path
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -73,6 +73,7 @@ BASE       = Path(__file__).parent.resolve()
 CF_SCANNER = BASE / "cf-scanner"
 VERIFY_PY  = BASE / "verify.py"
 API_URL    = "https://api.090227.xyz/check"
+TG_CONFIG_FILE = BASE / "tg_config.json"  # 🌟 新增：Telegram 配置文件路径
 
 if CF_SCANNER.is_file():
     CF_SCANNER.chmod(0o755)
@@ -371,8 +372,45 @@ def speed_test():
         f.write("IP地址,端口,TLS,数据中心,地区,城市,网络延迟,下载速度,ASN\n")
         f.write("\n".join(results) + "\n")
 
-# ── 输出 + 下载链接 (彻底兼容未测速状态) ──
-def output_csv(asns):
+# ── Telegram 发送文件功能 ──
+def send_to_telegram(file_path, bot_token, chat_id):
+    if not bot_token or not chat_id:
+        return
+    
+    url = f"https://tg.250887.xyz/bot{bot_token}/sendDocument"
+    boundary = uuid.uuid4().hex
+    headers = {'Content-type': f'multipart/form-data; boundary={boundary}'}
+    file_name = os.path.basename(file_path)
+    
+    try:
+        with open(file_path, 'rb') as f:
+            file_content = f.read()
+    except Exception as e:
+        print(f"  ❌ 读取结果文件失败，无法发送 tgbot: {e}")
+        return
+
+    # 构造 multipart/form-data
+    body_parts = []
+    body_parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"chat_id\"\r\n\r\n{chat_id}\r\n".encode('utf-8'))
+    body_parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"document\"; filename=\"{file_name}\"\r\nContent-Type: text/csv\r\n\r\n".encode('utf-8'))
+    body_parts.append(file_content)
+    body_parts.append(f"\r\n--{boundary}--\r\n".encode('utf-8'))
+    body = b"".join(body_parts)
+
+    req = urllib.request.Request(url, data=body, headers=headers)
+    try:
+        print(f"\n  [tgbot] 正在发送结果到 Telegram 会话 {chat_id}...")
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            res_data = json.loads(resp.read())
+            if res_data.get("ok"):
+                print("  ✅ 成功发送结果到 Telegram!")
+            else:
+                print(f"  ❌ Telegram 发送失败: {res_data.get('description')}")
+    except Exception as e:
+        print(f"  ❌ Telegram 发送请求异常: {e}")
+
+# ── 输出 + 下载链接 ──
+def output_csv(asns, tg_token="", tg_chat_id=""):
     verified_file = BASE / "verified.txt"
     if not verified_file.exists() or verified_file.stat().st_size == 0:
         print("  无结果")
@@ -402,6 +440,10 @@ def output_csv(asns):
             f.write(line + "\n")
 
     print(f"\n  结果: {len(lines)} 条 → {output.name}")
+
+    # 发送 Telegram 结果
+    if tg_token and tg_chat_id:
+        send_to_telegram(output, tg_token, tg_chat_id)
 
     lan_ip = get_lan_ip()
     port = 8899
@@ -497,7 +539,45 @@ if __name__ == "__main__":
             print("  ssh 断线不杀: screen -S scan → python3 run.py AS209242 → Ctrl+A D")
             sys.exit(1)
     
-    # ── 🌟 新增：用户自定义 PPS 速率 ──
+    # ── 读取或保存 Telegram Bot 配置 ──
+    tg_token = ""
+    tg_chat_id = ""
+
+    if TG_CONFIG_FILE.exists():
+        try:
+            with open(TG_CONFIG_FILE, "r") as f:
+                cfg = json.load(f)
+                tg_token = cfg.get("tg_token", "")
+                tg_chat_id = cfg.get("tg_chat_id", "")
+            if tg_token and tg_chat_id:
+                print(f"  ✅ 自动加载 Telegram 配置 (Chat ID: {tg_chat_id})")
+        except Exception:
+            pass
+
+    # 如果配置文件里没有读取到，则提示输入并保存
+    if not tg_token or not tg_chat_id:
+        try:
+            print("\n  [首次配置 Telegram 推送]")
+            tg_token = input("  设置 Telegram Bot 秘钥 (可选，回车跳过发送): ").strip()
+            if tg_token:
+                tg_chat_id = input("  设置 Telegram 会话窗口 ID (必填): ").strip()
+                if not tg_chat_id:
+                    print("  ⚠️ 未输入会话窗口 ID，将取消 Telegram 发送。")
+                    tg_token = ""
+                else:
+                    # 写入到 json 配置文件中
+                    try:
+                        with open(TG_CONFIG_FILE, "w") as f:
+                            json.dump({"tg_token": tg_token, "tg_chat_id": tg_chat_id}, f)
+                        print("  ✅ Telegram 配置已保存，下次运行将自动读取。")
+                    except Exception as e:
+                        print(f"  ❌ 保存 Telegram 配置失败: {e}")
+        except (EOFError, KeyboardInterrupt):
+            tg_token = ""
+            tg_chat_id = ""
+            print("\n  ⚠️ 跳过 Telegram 配置。")
+
+    # ── 用户自定义 PPS 速率 ──
     try:
         pps_input = input("  设置 masscan 扫描速率 PPS (回车默认 1000): ").strip()
         if pps_input:
@@ -555,7 +635,9 @@ if __name__ == "__main__":
             print(f"  ❌ 任务提前终止: {e}")
             sys.exit(1)
 
-    output_csv(asns)
+    # 携带 TG 参数输出结果
+    output_csv(asns, tg_token, tg_chat_id)
+    
     print()
     print("  ───")
     print("  SSH 断线不杀: screen -S scan → python3 run.py AS209242 → Ctrl+A D")
