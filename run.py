@@ -4,7 +4,7 @@
 cf-ip-scanner — 从 ASN 拉取 IP，masscan 扫描，检测 Cloudflare 反代节点
 用法: python3 run.py AS209242 [AS3214 ...]
 """
-import sys, os, subprocess, json, urllib.request, multiprocessing, socket, time, re, threading
+import sys, os, subprocess, json, urllib.request, multiprocessing, socket, time, re, threading, ipaddress, random
 from pathlib import Path
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -79,7 +79,7 @@ if CF_SCANNER.is_file():
 
 # ── Step 1: ASN → CIDR ──
 def fetch_prefixes(asns):
-    cidrs = []
+    raw_cidrs = []
     for asn in asns:
         url = f"https://stat.ripe.net/data/announced-prefixes/data.json?resource=AS{asn}"
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
@@ -92,7 +92,7 @@ def fetch_prefixes(asns):
                     count = 0
                     for p in data["data"]["prefixes"]:
                         if ":" not in p["prefix"]:
-                            cidrs.append(p["prefix"])
+                            raw_cidrs.append(p["prefix"])
                             count += 1
                     print(f"  AS{asn} → 获取到 {count} 个 IPv4 CIDR")
                     success = True
@@ -104,12 +104,23 @@ def fetch_prefixes(asns):
         if not success:
             print(f"  ❌ AS{asn} → 获取失败，跳过该 ASN。")
 
-    if not cidrs:
+    if not raw_cidrs:
         raise ValueError("拉取到的 CIDR 数量为 0，可能是网络无法连接 API 或输入了无效的 ASN 编号。程序已安全停止。")
+
+    # ── 新增功能: CIDR 数学合并与去重 ──
+    net_objs = []
+    for c in raw_cidrs:
+        try:
+            net_objs.append(ipaddress.IPv4Network(c, strict=False))
+        except ValueError:
+            pass
+    
+    merged_nets = list(ipaddress.collapse_addresses(net_objs))
+    cidrs = [str(net) for net in merged_nets]
 
     cidr_file = BASE / "cidrs.txt"
     cidr_file.write_text("\n".join(cidrs))
-    print(f"  共获取 {len(cidrs)} 个 CIDR")
+    print(f"  共获取 {len(raw_cidrs)} 个 CIDR，合并去重后实际扫描 {len(cidrs)} 个网段")
     return cidrs
 
 # ── 端口解析 ──
@@ -200,17 +211,26 @@ def run_masscan(ports_str=None):
         subprocess.run(["sudo", "chown", f"{uid}:{gid}", str(result_file)], check=False)
 
     total = 0
+    parsed_lines = []
     tmp_file = result_file.with_suffix(".tmp")
-    with open(result_file) as src, open(tmp_file, "w") as dst:
+    
+    with open(result_file) as src:
         for line in src:
             if line.startswith("#") or not line.strip():
                 continue
             parts = line.strip().split()
             if len(parts) >= 4 and parts[0] == "open":
-                dst.write(f"{parts[3]}:{parts[2]}\n")
-                total += 1
+                parsed_lines.append(f"{parts[3]}:{parts[2]}\n")
+    
+    # ── 新增功能: IP 乱序打乱 (Fisher-Yates Shuffle) ──
+    random.shuffle(parsed_lines)
+
+    with open(tmp_file, "w") as dst:
+        dst.writelines(parsed_lines)
+        
+    total = len(parsed_lines)
     tmp_file.replace(result_file)
-    print(f"  开放端口: {total}")
+    print(f"  开放端口: {total} (已完成乱序打乱)")
     return total
 
 # ── Step 4: cf-scanner 粗筛 ──
