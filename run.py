@@ -56,7 +56,7 @@ def get_lan_ip():
 
 # ── 🌟 家用光猫安全核心配置 🌟 ──
 
-# masscan：无状态 UDP 发包，默认 1000 pps，现在可以通过用户输入动态修改
+# masscan：无状态 UDP 发包，默认 1000 pps
 MASSCAN_RATE = 1000
 
 # cf-scanner：有状态 TCP/TLS 握手。40 并发是光猫稳定不丢包的甜点值。
@@ -69,14 +69,59 @@ API_CONCURRENT = 8
 API_CHUNK = 300
 
 
-BASE       = Path(__file__).parent.resolve()
-CF_SCANNER = BASE / "cf-scanner"
-VERIFY_PY  = BASE / "verify.py"
-API_URL    = "https://api.090227.xyz/check"
-TG_CONFIG_FILE = BASE / "tg_config.json"  # 🌟 新增：Telegram 配置文件路径
+BASE           = Path(__file__).parent.resolve()
+CF_SCANNER     = BASE / "cf-scanner"
+VERIFY_PY      = BASE / "verify.py"
+API_URL        = "https://api.090227.xyz/check"
+TG_CONFIG_FILE = BASE / "tg_config.json"
 
 if CF_SCANNER.is_file():
     CF_SCANNER.chmod(0o755)
+
+# ── Telegram 配置初始化（最先运行） ──
+def setup_telegram_config():
+    tg_token = ""
+    tg_chat_id = ""
+
+    # 1. 存在配置文件，静默读取
+    if TG_CONFIG_FILE.exists():
+        try:
+            with open(TG_CONFIG_FILE, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+                tg_token = cfg.get("tg_token", "")
+                tg_chat_id = cfg.get("tg_chat_id", "")
+            if tg_token and tg_chat_id:
+                print(f"  ✅ 已加载 Telegram 配置 (Chat ID: {tg_chat_id})")
+            else:
+                print("  ℹ️ Telegram 推送功能未启用")
+            return tg_token, tg_chat_id
+        except Exception:
+            pass
+
+    # 2. 首次运行，提示填写
+    print("\n  [Telegram 推送设置]")
+    try:
+        tg_token = input("  输入 Telegram Bot Token (直接回车跳过不启用): ").strip()
+        if tg_token:
+            tg_chat_id = input("  输入 Telegram Chat ID: ").strip()
+            if not tg_chat_id:
+                print("  ⚠️ 未输入 Chat ID，取消启用 TG 发送。")
+                tg_token = ""
+
+        # 保存配置到本地，避免下次重复询问
+        with open(TG_CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump({"tg_token": tg_token, "tg_chat_id": tg_chat_id}, f, ensure_ascii=False, indent=2)
+
+        if tg_token and tg_chat_id:
+            print("  ✅ Telegram 配置已保存！下次将自动读取。")
+        else:
+            print("  ℹ️ 已跳过 Telegram 配置，以后启动将默认不开启推送。")
+
+    except (EOFError, KeyboardInterrupt):
+        print("\n  ⚠️ 取消 Telegram 配置。")
+        tg_token, tg_chat_id = "", ""
+
+    return tg_token, tg_chat_id
 
 # ── Step 1: ASN → CIDR ──
 def fetch_prefixes(asns):
@@ -372,7 +417,7 @@ def speed_test():
         f.write("IP地址,端口,TLS,数据中心,地区,城市,网络延迟,下载速度,ASN\n")
         f.write("\n".join(results) + "\n")
 
-# ── Telegram 发送文件功能 ──
+# ── Telegram 发送文件 ──
 def send_to_telegram(file_path, bot_token, chat_id):
     if not bot_token or not chat_id:
         return
@@ -386,28 +431,28 @@ def send_to_telegram(file_path, bot_token, chat_id):
         with open(file_path, 'rb') as f:
             file_content = f.read()
     except Exception as e:
-        print(f"  ❌ 读取结果文件失败，无法发送 tgbot: {e}")
+        print(f"  ❌ 读取文件失败，取消发送 Telegram: {e}")
         return
 
-    # 构造 multipart/form-data
-    body_parts = []
-    body_parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"chat_id\"\r\n\r\n{chat_id}\r\n".encode('utf-8'))
-    body_parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"document\"; filename=\"{file_name}\"\r\nContent-Type: text/csv\r\n\r\n".encode('utf-8'))
-    body_parts.append(file_content)
-    body_parts.append(f"\r\n--{boundary}--\r\n".encode('utf-8'))
+    body_parts = [
+        f"--{boundary}\r\nContent-Disposition: form-data; name=\"chat_id\"\r\n\r\n{chat_id}\r\n".encode('utf-8'),
+        f"--{boundary}\r\nContent-Disposition: form-data; name=\"document\"; filename=\"{file_name}\"\r\nContent-Type: text/csv\r\n\r\n".encode('utf-8'),
+        file_content,
+        f"\r\n--{boundary}--\r\n".encode('utf-8')
+    ]
     body = b"".join(body_parts)
 
     req = urllib.request.Request(url, data=body, headers=headers)
     try:
-        print(f"\n  [tgbot] 正在发送结果到 Telegram 会话 {chat_id}...")
+        print(f"\n  [tgbot] 正在发送文件至 Telegram...")
         with urllib.request.urlopen(req, timeout=30) as resp:
             res_data = json.loads(resp.read())
             if res_data.get("ok"):
-                print("  ✅ 成功发送结果到 Telegram!")
+                print("  ✅ 成功推送至 Telegram!")
             else:
                 print(f"  ❌ Telegram 发送失败: {res_data.get('description')}")
     except Exception as e:
-        print(f"  ❌ Telegram 发送请求异常: {e}")
+        print(f"  ❌ Telegram 发送异常: {e}")
 
 # ── 输出 + 下载链接 ──
 def output_csv(asns, tg_token="", tg_chat_id=""):
@@ -441,7 +486,7 @@ def output_csv(asns, tg_token="", tg_chat_id=""):
 
     print(f"\n  结果: {len(lines)} 条 → {output.name}")
 
-    # 发送 Telegram 结果
+    # 发送至 TG
     if tg_token and tg_chat_id:
         send_to_telegram(output, tg_token, tg_chat_id)
 
@@ -506,14 +551,18 @@ def output_csv(asns, tg_token="", tg_chat_id=""):
 
 # ── Main ──
 if __name__ == "__main__":
+    # ── 1. 首先检查/读取 Telegram 配置 ──
+    tg_token, tg_chat_id = setup_telegram_config()
+
+    # ── 2. 读取 ASN 编号 ──
     if len(sys.argv) < 2:
         try:
-            raw = input("  输入 ASN 编号 (多个用逗号分隔): ").strip()
+            raw = input("\n  输入 ASN 编号 (多个用逗号分隔): ").strip()
         except (EOFError, KeyboardInterrupt):
             try:
                 with open("/dev/tty") as tty:
                     os.dup2(tty.fileno(), 0)
-                raw = input("  输入 ASN 编号 (多个用逗号分隔): ").strip()
+                raw = input("\n  输入 ASN 编号 (多个用逗号分隔): ").strip()
             except:
                 print(f"\n  请在终端运行: cd {BASE} && python3 run.py\n")
                 sys.exit(0)
@@ -539,45 +588,7 @@ if __name__ == "__main__":
             print("  ssh 断线不杀: screen -S scan → python3 run.py AS209242 → Ctrl+A D")
             sys.exit(1)
     
-    # ── 读取或保存 Telegram Bot 配置 ──
-    tg_token = ""
-    tg_chat_id = ""
-
-    if TG_CONFIG_FILE.exists():
-        try:
-            with open(TG_CONFIG_FILE, "r") as f:
-                cfg = json.load(f)
-                tg_token = cfg.get("tg_token", "")
-                tg_chat_id = cfg.get("tg_chat_id", "")
-            if tg_token and tg_chat_id:
-                print(f"  ✅ 自动加载 Telegram 配置 (Chat ID: {tg_chat_id})")
-        except Exception:
-            pass
-
-    # 如果配置文件里没有读取到，则提示输入并保存
-    if not tg_token or not tg_chat_id:
-        try:
-            print("\n  [首次配置 Telegram 推送]")
-            tg_token = input("  设置 Telegram Bot 秘钥 (可选，回车跳过发送): ").strip()
-            if tg_token:
-                tg_chat_id = input("  设置 Telegram 会话窗口 ID (必填): ").strip()
-                if not tg_chat_id:
-                    print("  ⚠️ 未输入会话窗口 ID，将取消 Telegram 发送。")
-                    tg_token = ""
-                else:
-                    # 写入到 json 配置文件中
-                    try:
-                        with open(TG_CONFIG_FILE, "w") as f:
-                            json.dump({"tg_token": tg_token, "tg_chat_id": tg_chat_id}, f)
-                        print("  ✅ Telegram 配置已保存，下次运行将自动读取。")
-                    except Exception as e:
-                        print(f"  ❌ 保存 Telegram 配置失败: {e}")
-        except (EOFError, KeyboardInterrupt):
-            tg_token = ""
-            tg_chat_id = ""
-            print("\n  ⚠️ 跳过 Telegram 配置。")
-
-    # ── 用户自定义 PPS 速率 ──
+    # ── 3. 设置 masscan 速率 ──
     try:
         pps_input = input("  设置 masscan 扫描速率 PPS (回车默认 1000): ").strip()
         if pps_input:
@@ -591,6 +602,7 @@ if __name__ == "__main__":
     print(f"\n  配置: masscan={MASSCAN_RATE}pps, cf-scanner={CF_SCANNER_CONC}c, API={API_CONCURRENT}c(块{API_CHUNK})")
     print(f"  ASN: {', '.join(f'AS{a}' for a in asns)}\n")
 
+    # ── 4. 端口设置 ──
     scan_ports = DEFAULT_PORTS
     if len(sys.argv) < 2:
         print(f"  默认端口: {DEFAULT_PORTS}")
@@ -610,6 +622,7 @@ if __name__ == "__main__":
                 print(f"  自定义端口: {scan_ports}")
                 break
 
+    # ── 5. 执行流程 ──
     steps = [
         ("1/6 ASN→CIDR", lambda: fetch_prefixes(asns)),
         ("2/6 masscan",   lambda: run_masscan(scan_ports)),
@@ -635,9 +648,9 @@ if __name__ == "__main__":
             print(f"  ❌ 任务提前终止: {e}")
             sys.exit(1)
 
-    # 携带 TG 参数输出结果
+    # ── 6. 输出结果并尝试 TG 推送 ──
     output_csv(asns, tg_token, tg_chat_id)
-    
+
     print()
     print("  ───")
     print("  SSH 断线不杀: screen -S scan → python3 run.py AS209242 → Ctrl+A D")
