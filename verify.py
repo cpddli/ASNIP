@@ -111,7 +111,7 @@ def main():
     parser.add_argument("--input", required=True, help="输入 IP 列表文件")
     parser.add_argument("--output", required=True, help="输出结果 CSV 文件")
     parser.add_argument(
-        "--api", default="https://cfapi.250887.xyz/check", help="API 接口地址"
+        "--api", default="https://api.250887.xyz/check", help="API 接口地址"
     )
     parser.add_argument("--chunk", type=int, default=5000, help="兼容性分块大小")
     parser.add_argument(
