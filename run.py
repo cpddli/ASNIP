@@ -62,8 +62,8 @@ MASSCAN_RATE = 1000
 # cf-scanner：有状态 TCP/TLS 握手。40 并发是光猫稳定不丢包的甜点值。
 CF_SCANNER_CONC = 40
 
-# API 验证并发：20 个并发短连接，保护光猫 NAT 表
-API_CONCURRENT = 20
+# API 验证并发：15 个并发短连接，保护光猫 NAT 表
+API_CONCURRENT = 15
 
 # API 单次提交量：300。将原本几千 IP 一次性提交拆散为几百个一组。
 API_CHUNK = 300
