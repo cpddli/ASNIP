@@ -2,18 +2,23 @@
 # -*- coding: utf-8 -*-
 """
 API 精筛 — 调用 API 验证 CF 节点可用性
-流式并发，支持实时进度条显示
+优化版：引入 requests.Session() 连接池与 Keep-Alive 机制，极大降低高延迟网络下的 TLS 握手开销
 """
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import json
 import sys
 import time
-import urllib.request
+
+try:
+    import requests
+    from requests.adapters import HTTPAdapter
+except ImportError:
+    sys.stderr.write("  ❌ 缺少 requests 库。请先运行: pip3 install requests\n")
+    sys.exit(1)
 
 
-def check_single(line, api_url):
-    """通过 API 检查单条 IP:PORT，返回符合 cfnb 格式的字符串或 None"""
+def check_single(line, api_url, session):
+    """通过 API 检查单条 IP:PORT，复用全局 Session，返回 cfnb 格式的字符串"""
     line = line.strip()
     if not line or line.startswith("#"):
         return None
@@ -21,7 +26,6 @@ def check_single(line, api_url):
     parts = line.split()
     ip_port = parts[0] if parts else line
 
-    # 简单的格式校验
     if ":" not in ip_port:
         return None
 
@@ -32,31 +36,36 @@ def check_single(line, api_url):
         "Origin": "https://090227.xyz",
     }
 
-    # 增加 1 次网络抖动重试
+    # 重试机制 (网络抖动保护)
     for attempt in range(2):
         try:
-            req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=8) as resp:
-                data = json.loads(resp.read().decode("utf-8", errors="ignore"))
-                if not data.get("success"):
-                    return None
+            # timeout=(连接超时, 读取超时)，避免卡死
+            resp = session.get(url, headers=headers, timeout=(4, 8))
+            
+            # 如果接口限流或异常，触发重试
+            if resp.status_code != 200:
+                raise ValueError(f"HTTP {resp.status_code}")
+                
+            data = resp.json()
+            if not data.get("success"):
+                return None
 
-                # 解析 exit 节点信息
-                pr = data.get("probe_results", {})
-                exit_info = (
-                    pr.get("ipv4", {}).get("exit")
-                    or pr.get("ipv6", {}).get("exit")
-                    or {}
-                )
+            # 解析 exit 节点信息
+            pr = data.get("probe_results", {})
+            exit_info = (
+                pr.get("ipv4", {}).get("exit")
+                or pr.get("ipv6", {}).get("exit")
+                or {}
+            )
 
-                colo = exit_info.get("colo", data.get("colo", ""))
-                country = exit_info.get("country", "")
-                region = exit_info.get("region", "")
-                asn = exit_info.get("asn", data.get("asn", ""))
+            colo = exit_info.get("colo", data.get("colo", ""))
+            country = exit_info.get("country", "")
+            region = exit_info.get("region", "")
+            asn = exit_info.get("asn", data.get("asn", ""))
 
-                ip, port = ip_port.rsplit(":", 1)
-                # cfnb 格式: IP地址,端口,TLS,数据中心,地区,城市,网络延迟,下载速度,ASN
-                return f"{ip},{port},TRUE,{colo},{country},{region},,,AS{asn}"
+            ip, port = ip_port.rsplit(":", 1)
+            return f"{ip},{port},TRUE,{colo},{country},{region},,,AS{asn}"
+            
         except Exception:
             if attempt == 0:
                 time.sleep(0.5)  # 首次失败稍作等待再重试
@@ -66,20 +75,18 @@ def check_single(line, api_url):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Cloudflare API Verify Tool")
+    parser = argparse.ArgumentParser(description="Cloudflare API Verify Tool (Optimized)")
     parser.add_argument("--input", required=True, help="输入 IP 列表文件")
     parser.add_argument("--output", required=True, help="输出结果 CSV 文件")
     parser.add_argument(
         "--api", default="https://cfapi.250887.xyz/check", help="API 接口地址"
     )
-    # 增加 --chunk 参数以保证与 run.py 传入的参数无缝兼容
     parser.add_argument("--chunk", type=int, default=5000, help="兼容性分块大小")
     parser.add_argument(
         "--concurrent", type=int, default=32, help="线程并发数"
     )
     args = parser.parse_args()
 
-    # 读取并去重/过滤空行
     try:
         with open(args.input, "r", encoding="utf-8", errors="ignore") as f:
             all_lines = [l.strip() for l in f if l.strip() and not l.startswith("#")]
@@ -92,6 +99,20 @@ def main():
         sys.stderr.write("  ⚠️ 输入列表为空，跳过验证。\n")
         sys.exit(0)
 
+    # ---------------------------------------------------------
+    # 核心优化：初始化全局 Session 连接池
+    # pool_connections: 缓存的连接池数量
+    # pool_maxsize: 连接池中允许保存的最大连接数（匹配线程并发数）
+    # ---------------------------------------------------------
+    session = requests.Session()
+    adapter = HTTPAdapter(
+        pool_connections=args.concurrent, 
+        pool_maxsize=args.concurrent,
+        max_retries=1 # 底层自动处理轻微的连接中断重试
+    )
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+
     passed = 0
     done = 0
     start_time = time.time()
@@ -101,20 +122,19 @@ def main():
         out.write("IP地址,端口,TLS,数据中心,地区,城市,网络延迟,下载速度,ASN\n")
 
         with ThreadPoolExecutor(max_workers=args.concurrent) as executor:
-            # 提交所有任务
+            # 提交任务，将复用的 session 传入工作线程
             future_to_line = {
-                executor.submit(check_single, line, args.api): line
+                executor.submit(check_single, line, args.api, session): line
                 for line in all_lines
             }
 
-            # 逐个接收完成结果，实现实时进度打印
             for future in as_completed(future_to_line):
                 done += 1
                 result = future.result()
 
                 if result:
                     out.write(result + "\n")
-                    out.flush()  # 实时刷盘，防止丢失数据
+                    out.flush()
                     passed += 1
 
                 # 计算并刷新实时进度条
@@ -131,11 +151,13 @@ def main():
                 )
                 sys.stderr.flush()
 
+    # 关闭并释放连接池
+    session.close()
+
     total_elapsed = int(time.time() - start_time)
     sys.stderr.write(
         f"\r  [{'█' * bar_width}] 100.0% ({total}/{total}) | 通过 {passed}/{total} | 耗时 {total_elapsed // 60}m{total_elapsed % 60}s{' ' * 20}\n"
     )
-
 
 if __name__ == "__main__":
     main()
