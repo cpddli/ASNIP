@@ -72,7 +72,7 @@ API_CHUNK = 300
 BASE       = Path(__file__).parent.resolve()
 CF_SCANNER = BASE / "cf-scanner"
 VERIFY_PY  = BASE / "verify.py"
-API_URL    = "https://api.090227.xyz/check"
+API_URL    = "https://api.250887.xyz/check"
 
 if CF_SCANNER.is_file():
     CF_SCANNER.chmod(0o755)
