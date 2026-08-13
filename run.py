@@ -77,24 +77,25 @@ API_URL    = "https://api.250887.xyz/check"
 if CF_SCANNER.is_file():
     CF_SCANNER.chmod(0o755)
 
-# ── Step 1: ASN → CIDR ──
+# ── Step 1: ASN → CIDR (修改后：使用自建 API) ──
 def fetch_prefixes(asns):
     raw_cidrs = []
+    # ⚠️ 将此处的网址替换为你的自建 API 域名
+    API_DOMAIN = "https://as.250887.xyz"
+
     for asn in asns:
-        url = f"https://stat.ripe.net/data/announced-prefixes/data.json?resource=AS{asn}"
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+        url = f"{API_DOMAIN}/AS{asn}"
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
         success = False
         
         for attempt in range(3):
             try:
                 with urllib.request.urlopen(req, timeout=10) as resp:
-                    data = json.loads(resp.read())
-                    count = 0
-                    for p in data["data"]["prefixes"]:
-                        if ":" not in p["prefix"]:
-                            raw_cidrs.append(p["prefix"])
-                            count += 1
-                    print(f"  AS{asn} → 获取到 {count} 个 IPv4 CIDR")
+                    # 自建接口返回的是纯文本，按行分割
+                    text = resp.read().decode('utf-8').strip()
+                    lines = [line.strip() for line in text.splitlines() if line.strip() and ":" not in line]
+                    raw_cidrs.extend(lines)
+                    print(f"  AS{asn} → 获取到 {len(lines)} 个 IPv4 CIDR")
                     success = True
                     break
             except Exception as e:
@@ -107,7 +108,7 @@ def fetch_prefixes(asns):
     if not raw_cidrs:
         raise ValueError("拉取到的 CIDR 数量为 0，可能是网络无法连接 API 或输入了无效的 ASN 编号。程序已安全停止。")
 
-    # ── 新增功能: CIDR 数学合并与去重 ──
+    # ── CIDR 数学合并与去重 ──
     net_objs = []
     for c in raw_cidrs:
         try:
