@@ -56,18 +56,10 @@ def get_lan_ip():
 
 # ── 🌟 家用光猫安全核心配置 🌟 ──
 
-# masscan：无状态 UDP 发包，默认 1000 pps，现在可以通过用户输入动态修改
 MASSCAN_RATE = 1000
-
-# cf-scanner：有状态 TCP/TLS 握手。40 并发是光猫稳定不丢包的甜点值。
 CF_SCANNER_CONC = 40
-
-# API 验证并发：15 个并发短连接，保护光猫 NAT 表
 API_CONCURRENT = 15
-
-# API 单次提交量：300。将原本几千 IP 一次性提交拆散为几百个一组。
 API_CHUNK = 300
-
 
 BASE       = Path(__file__).parent.resolve()
 CF_SCANNER = BASE / "cf-scanner"
@@ -77,10 +69,9 @@ API_URL    = "https://api.250887.xyz/check"
 if CF_SCANNER.is_file():
     CF_SCANNER.chmod(0o755)
 
-# ── Step 1: ASN → CIDR (修改后：使用自建 API) ──
+# ── Step 1: ASN → CIDR ──
 def fetch_prefixes(asns):
     raw_cidrs = []
-    # ⚠️ 将此处的网址替换为你的自建 API 域名
     API_DOMAIN = "https://as.250887.xyz"
 
     for asn in asns:
@@ -91,7 +82,6 @@ def fetch_prefixes(asns):
         for attempt in range(3):
             try:
                 with urllib.request.urlopen(req, timeout=10) as resp:
-                    # 自建接口返回的是纯文本，按行分割
                     text = resp.read().decode('utf-8').strip()
                     lines = [line.strip() for line in text.splitlines() if line.strip() and ":" not in line]
                     raw_cidrs.extend(lines)
@@ -108,7 +98,6 @@ def fetch_prefixes(asns):
     if not raw_cidrs:
         raise ValueError("拉取到的 CIDR 数量为 0，可能是网络无法连接 API 或输入了无效的 ASN 编号。程序已安全停止。")
 
-    # ── CIDR 数学合并与去重 ──
     net_objs = []
     for c in raw_cidrs:
         try:
@@ -223,7 +212,6 @@ def run_masscan(ports_str=None):
             if len(parts) >= 4 and parts[0] == "open":
                 parsed_lines.append(f"{parts[3]}:{parts[2]}\n")
     
-    # ── 新增功能: IP 乱序打乱 (Fisher-Yates Shuffle) ──
     random.shuffle(parsed_lines)
 
     with open(tmp_file, "w") as dst:
@@ -238,6 +226,13 @@ def run_masscan(ports_str=None):
 def cf_scan():
     new_file = BASE / "masscan_result.txt"
     hits_file = BASE / "cf_hits.txt"
+
+    # 【修复BUG】：清理上一次历史残留文件，防止追加写入
+    if hits_file.exists():
+        try:
+            hits_file.unlink()
+        except:
+            pass
 
     if not new_file.exists() or new_file.stat().st_size == 0:
         print("  无开放端口，跳过")
@@ -271,7 +266,7 @@ def cf_scan():
         sys.stderr.flush()
         raise subprocess.CalledProcessError(proc.returncode, proc.args)
 
-    hits = sum(1 for _ in open(hits_file))
+    hits = sum(1 for _ in open(hits_file)) if hits_file.exists() else 0
     print(f"  CF 节点: {hits}")
     return hits
 
@@ -279,6 +274,13 @@ def cf_scan():
 def api_verify():
     hits_file = BASE / "cf_hits.txt"
     verified_file = BASE / "verified.txt"
+
+    # 【修复BUG】：清理上一次历史残留文件，防止追加写入
+    if verified_file.exists():
+        try:
+            verified_file.unlink()
+        except:
+            pass
 
     if not hits_file.exists() or hits_file.stat().st_size == 0:
         print("  无 CF 节点，跳过")
@@ -295,11 +297,37 @@ def api_verify():
         "--concurrent", str(API_CONCURRENT)
     ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
 
+    bar_width = 30
+    passed_count = 0
+
     for line in proc.stdout:
-        sys.stdout.write("  " + line)
-        sys.stdout.flush()
+        line = line.strip()
+        if not line:
+            continue
+        
+        m_pct = re.search(r"(\d+\.?\d*)%", line)
+        m_pass = re.search(r"(?:通过|passed)\s*(\d+)", line, re.IGNORECASE)
+        m_count = re.search(r"\((\d+)/(\d+)\)", line)
+
+        if m_pct:
+            pct = min(float(m_pct.group(1)), 100.0)
+            filled = int(bar_width * pct / 100)
+            bar = "█" * filled + "░" * (bar_width - filled)
+
+            if m_pass:
+                passed_count = int(m_pass.group(1))
+
+            if m_count:
+                done, total = m_count.group(1), m_count.group(2)
+                sys.stderr.write(f"\r  [{bar}] {pct:.1f}% ({done}/{total}) | 通过: {passed_count}{'':15}")
+            else:
+                sys.stderr.write(f"\r  [{bar}] {pct:.1f}% | 通过: {passed_count}{'':15}")
+            sys.stderr.flush()
 
     proc.wait()
+    sys.stderr.write(f"\r  [{'█' * bar_width}] 100.0% | 精筛完成{'':20}\n")
+    sys.stderr.flush()
+
     passed = sum(1 for _ in open(verified_file)) if verified_file.exists() else 0
     print(f"  精筛完成，通过节点: {passed}")
     return passed
@@ -392,7 +420,7 @@ def speed_test():
         f.write("IP地址,端口,TLS,数据中心,地区,城市,网络延迟,下载速度,ASN\n")
         f.write("\n".join(results) + "\n")
 
-# ── 输出 + 下载链接 (彻底兼容未测速状态) ──
+# ── 输出 + 下载链接 ──
 def output_csv(asns):
     verified_file = BASE / "verified.txt"
     if not verified_file.exists() or verified_file.stat().st_size == 0:
@@ -442,7 +470,7 @@ def output_csv(asns):
                                  capture_output=True, text=True, timeout=5)
             for line in out.stdout.split("\n"):
                 if f":{p}" in line and "users:" in line:
-                    m = __import__("re").search(r"pid=(\d+)", line)
+                    m = re.search(r"pid=(\d+)", line)
                     if m:
                         os.kill(int(m.group(1)), signal.SIGTERM)
                         time.sleep(0.5)
@@ -518,7 +546,6 @@ if __name__ == "__main__":
             print("  ssh 断线不杀: screen -S scan → python3 run.py AS209242 → Ctrl+A D")
             sys.exit(1)
     
-    # ── 🌟 新增：用户自定义 PPS 速率 ──
     try:
         pps_input = input("  设置 masscan 扫描速率 PPS (回车默认 1000): ").strip()
         if pps_input:
