@@ -71,17 +71,19 @@ TG_API_BASE    = "https://tg.250887.xyz"
 if CF_SCANNER.is_file():
     CF_SCANNER.chmod(0o755)
 
-# ── 安全输入辅助函数 ──
+# ── 安全输入辅助函数 (解决提示词重复输出问题) ──
 def safe_input(prompt_text):
+    print(prompt_text, end='', flush=True)
     try:
-        return input(prompt_text).strip()
+        if not sys.stdin.isatty():
+            try:
+                with open("/dev/tty", "r") as tty:
+                    return tty.readline().strip()
+            except Exception:
+                pass
+        return input().strip()
     except (EOFError, KeyboardInterrupt):
-        try:
-            with open("/dev/tty") as tty:
-                os.dup2(tty.fileno(), 0)
-            return input(prompt_text).strip()
-        except Exception:
-            return ""
+        return ""
 
 # ── Telegram Bot 配置与发送模块 ──
 def load_tg_config():
@@ -365,7 +367,6 @@ def cf_scan():
     new_file = BASE / "masscan_result.txt"
     hits_file = BASE / "cf_hits.txt"
 
-    # 【修复BUG】：清理上一次历史残留文件，防止追加写入
     if hits_file.exists():
         try:
             hits_file.unlink()
@@ -413,7 +414,6 @@ def api_verify():
     hits_file = BASE / "cf_hits.txt"
     verified_file = BASE / "verified.txt"
 
-    # 【修复BUG】：清理上一次历史残留文件，防止追加写入
     if verified_file.exists():
         try:
             verified_file.unlink()
@@ -641,7 +641,7 @@ def output_csv(asns):
             ["python3", "-m", "http.server", str(port), "--directory", str(BASE)],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
-        input()
+        safe_input("")
     except (EOFError, KeyboardInterrupt):
         pass
     finally:
