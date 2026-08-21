@@ -4,7 +4,7 @@
 cf-ip-scanner — 从 ASN 拉取 IP，masscan 扫描，检测 Cloudflare 反代节点
 用法: python3 run.py AS209242 [AS3214 ...]
 """
-import sys, os, subprocess, json, urllib.request, urllib.parse, multiprocessing, socket, time, re, threading, ipaddress, random
+import sys, os, subprocess, json, urllib.request, multiprocessing, socket, time, re, threading, ipaddress, random
 from pathlib import Path
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -65,207 +65,147 @@ BASE       = Path(__file__).parent.resolve()
 CF_SCANNER = BASE / "cf-scanner"
 VERIFY_PY  = BASE / "verify.py"
 API_URL    = "https://api.250887.xyz/check"
-
-# ── Telegram Bot 配置 ──
-# 首次运行会询问是否绑定 Telegram Bot；选择 n 或直接回车即可跳过。
-TG_CONFIG = BASE / "tg_config.json"
+TG_CONFIG_FILE = BASE / "tg_config.json"
+TG_API_BASE    = "https://tg.250887.xyz"
 
 if CF_SCANNER.is_file():
     CF_SCANNER.chmod(0o755)
 
-# ── Telegram Bot 功能 ──
+# ── 安全输入辅助函数 ──
+def safe_input(prompt_text):
+    try:
+        return input(prompt_text).strip()
+    except (EOFError, KeyboardInterrupt):
+        try:
+            with open("/dev/tty") as tty:
+                os.dup2(tty.fileno(), 0)
+            return input(prompt_text).strip()
+        except Exception:
+            return ""
+
+# ── Telegram Bot 配置与发送模块 ──
 def load_tg_config():
-    """读取 Telegram Bot 配置。"""
-    if not TG_CONFIG.exists():
-        return {}
-    try:
-        with open(TG_CONFIG, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-        if not isinstance(cfg, dict):
-            return {}
+    if TG_CONFIG_FILE.exists():
+        try:
+            with open(TG_CONFIG_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"enabled": False, "token": "", "chat_id": ""}
+
+def check_or_init_tg_config():
+    """首次运行时提示绑定 TG Bot，按回车可跳过"""
+    if not TG_CONFIG_FILE.exists():
+        print("  [Telegram Bot 设置]")
+        choice = safe_input("  首次运行，是否绑定 Telegram Bot？(y/N，按回车跳过不绑定): ").lower()
+        if choice == "y":
+            token = safe_input("  请输入 TG Bot Token: ")
+            chat_id = safe_input("  请输入 TG Chat ID: ")
+            if token and chat_id:
+                cfg = {"enabled": True, "token": token, "chat_id": chat_id}
+                try:
+                    with open(TG_CONFIG_FILE, "w", encoding="utf-8") as f:
+                        json.dump(cfg, f, ensure_ascii=False, indent=2)
+                    print("  ✅ Telegram Bot 绑定成功！\n")
+                    return cfg
+                except Exception as e:
+                    print(f"  ❌ 保存 TG 配置失败: {e}\n")
+            else:
+                print("  ⚠️ 输入不完整，已跳过绑定。\n")
+        
+        cfg = {"enabled": False, "token": "", "chat_id": ""}
+        try:
+            with open(TG_CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
         return cfg
-    except Exception as e:
-        print(f"  ⚠️ Telegram 配置读取失败: {e}")
-        return {}
+    else:
+        return load_tg_config()
 
+def send_tg_document(file_path, caption=""):
+    """利用 TG Bot 发送文件到指定会话 ID"""
+    cfg = load_tg_config()
+    token = cfg.get("token")
+    chat_id = cfg.get("chat_id")
 
-def save_tg_config(token, chat_id, enabled=True):
-    """保存 Telegram Bot 配置。"""
-    cfg = {
-        "enabled": bool(enabled),
-        "bot_token": token.strip(),
-        "chat_id": str(chat_id).strip()
-    }
-    with open(TG_CONFIG, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    if not token or not chat_id:
+        print("  尚未绑定 TG Bot，请输入配置:")
+        token = safe_input("  请输入 TG Bot Token: ")
+        chat_id = safe_input("  请输入 TG Chat ID: ")
+        if token and chat_id:
+            cfg = {"enabled": True, "token": token, "chat_id": chat_id}
+            try:
+                with open(TG_CONFIG_FILE, "w", encoding="utf-8") as f:
+                    json.dump(cfg, f, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+        else:
+            print("  ❌ 未提供完整的 TG 配置，取消发送。")
+            return False
+
+    url = f"{TG_API_BASE}/bot{token}/sendDocument"
+    file_path = Path(file_path)
+    if not file_path.exists():
+        print(f"  ❌ 文件不存在，无法发送: {file_path}")
+        return False
+
+    print(f"  正在发送 [{file_path.name}] 至 Telegram...")
+
+    # 优先方法 1: 使用系统 curl 命令行发送
     try:
-        TG_CONFIG.chmod(0o600)
+        cmd = [
+            "curl", "-s", "-X", "POST", url,
+            "-F", f"chat_id={chat_id}",
+            "-F", f"document=@{file_path}"
+        ]
+        if caption:
+            cmd.extend(["-F", f"caption={caption}"])
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if r.returncode == 0 and ("\"ok\":true" in r.stdout.lower() or "\"ok\": true" in r.stdout.lower()):
+            print("  ✅ 成功发送文件至 Telegram！")
+            return True
     except Exception:
         pass
-    return cfg
 
-
-def telegram_api_request(token, method, data=None, timeout=15):
-    """调用 Telegram Bot API，不依赖第三方 Python 包。"""
-    url = f"https://api.telegram.org/bot{token}/{method}"
-    payload = data or {}
-    encoded = urllib.parse.urlencode(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=encoded,
-        headers={"User-Agent": "cf-ip-scanner/1.0"}
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
-
-
-def telegram_validate_bot(token):
-    """验证 Bot Token 是否有效。"""
+    # 备用方法 2: urllib multipart 原生实现
     try:
-        result = telegram_api_request(token, "getMe", timeout=10)
-        if result.get("ok"):
-            return True, result.get("result", {}).get("username", "")
-        return False, result.get("description", "Bot Token 无效")
+        boundary = "----WebKitFormBoundary" + "".join(random.choices("0123456789abcdef", k=16))
+        body = []
+
+        body.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"chat_id\"\r\n\r\n{chat_id}\r\n".encode("utf-8"))
+
+        if caption:
+            body.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"caption\"\r\n\r\n{caption}\r\n".encode("utf-8"))
+
+        filename = file_path.name
+        with open(file_path, "rb") as f:
+            file_bytes = f.read()
+
+        header = (f"--{boundary}\r\n"
+                  f"Content-Disposition: form-data; name=\"document\"; filename=\"{filename}\"\r\n"
+                  f"Content-Type: application/octet-stream\r\n\r\n").encode("utf-8")
+
+        body.append(header + file_bytes + b"\r\n")
+        body.append(f"--{boundary}--\r\n".encode("utf-8"))
+
+        payload = b"".join(body)
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            res_text = resp.read().decode("utf-8")
+            if "\"ok\":true" in res_text.lower() or "\"ok\": true" in res_text.lower():
+                print("  ✅ 成功发送文件至 Telegram！")
+                return True
+            else:
+                print(f"  ❌ 发送失败，Telegram 返回: {res_text}")
+                return False
     except Exception as e:
-        return False, str(e)
-
-
-def setup_telegram_first_run():
-    """
-    首次运行绑定 Telegram。
-    回车或输入 n：跳过绑定，并记录为未启用，之后不再重复询问。
-    """
-    if TG_CONFIG.exists():
-        return load_tg_config()
-
-    print("\n  ── Telegram Bot 绑定（首次运行） ──")
-    print("  绑定后，脚本结束时可以把最终 CSV 结果文件发送到指定 Telegram 会话。")
-    print("  不想绑定直接回车即可，默认不绑定。")
-
-    try:
-        choice = input("  是否绑定 Telegram Bot？(y/n，默认 n): ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        choice = ""
-
-    if choice != "y":
-        save_tg_config("", "", enabled=False)
-        print("  已跳过 Telegram 绑定。")
-        return load_tg_config()
-
-    try:
-        token = input("  输入 Bot Token: ").strip()
-        if not token:
-            save_tg_config("", "", enabled=False)
-            print("  未输入 Token，跳过 Telegram 绑定。")
-            return load_tg_config()
-
-        ok, bot_name = telegram_validate_bot(token)
-        if not ok:
-            print(f"  ❌ Bot Token 验证失败: {bot_name}")
-            print("  本次不绑定，可删除 tg_config.json 后下次重新绑定。")
-            save_tg_config("", "", enabled=False)
-            return load_tg_config()
-
-        print(f"  ✓ Bot Token 有效：@{bot_name}" if bot_name else "  ✓ Bot Token 有效")
-
-        chat_id = input("  输入 Telegram 会话 ID (chat_id): ").strip()
-        if not chat_id:
-            save_tg_config("", "", enabled=False)
-            print("  未输入 chat_id，跳过 Telegram 绑定。")
-            return load_tg_config()
-
-        cfg = save_tg_config(token, chat_id, enabled=True)
-        print("  ✓ Telegram 绑定成功。")
-        return cfg
-
-    except (EOFError, KeyboardInterrupt):
-        save_tg_config("", "", enabled=False)
-        print("\n  已取消 Telegram 绑定。")
-        return load_tg_config()
-
-
-def telegram_send_file(file_path, cfg=None):
-    """将最终结果文件作为 document 发送到 Telegram。"""
-    cfg = cfg or load_tg_config()
-    token = str(cfg.get("bot_token", "")).strip()
-    chat_id = str(cfg.get("chat_id", "")).strip()
-
-    if not cfg.get("enabled") or not token or not chat_id:
-        print("  ⚠️ Telegram 未绑定，无法发送。")
+        print(f"  ❌ 发送至 Telegram 异常: {e}")
         return False
-
-    file_path = Path(file_path)
-    if not file_path.exists() or file_path.stat().st_size == 0:
-        print("  ❌ 结果文件不存在或为空，无法发送。")
-        return False
-
-    # Telegram sendDocument 使用 multipart/form-data。
-    boundary = "----cfscannerTelegramBoundary" + str(random.randint(100000, 999999))
-    fields = {
-        "chat_id": chat_id,
-        "caption": f"cf-ip-scanner 扫描结果\\n文件：{file_path.name}"
-    }
-
-    body = bytearray()
-    for name, value in fields.items():
-        body.extend(f"--{boundary}\\r\\n".encode())
-        body.extend(f'Content-Disposition: form-data; name="{name}"\\r\\n\\r\\n'.encode())
-        body.extend(str(value).encode("utf-8"))
-        body.extend(b"\\r\\n")
-
-    body.extend(f"--{boundary}\\r\\n".encode())
-    body.extend(
-        f'Content-Disposition: form-data; name="document"; filename="{file_path.name}"\\r\\n'.encode()
-    )
-    body.extend(b"Content-Type: text/csv\\r\\n\\r\\n")
-    body.extend(file_path.read_bytes())
-    body.extend(b"\\r\\n")
-    body.extend(f"--{boundary}--\\r\\n".encode())
-
-    url = f"https://api.telegram.org/bot{token}/sendDocument"
-    req = urllib.request.Request(
-        url,
-        data=bytes(body),
-        headers={
-            "Content-Type": f"multipart/form-data; boundary={boundary}",
-            "User-Agent": "cf-ip-scanner/1.0"
-        },
-        method="POST"
-    )
-
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-        if result.get("ok"):
-            print(f"  ✓ 已发送到 Telegram：{file_path.name}")
-            return True
-
-        print(f"  ❌ Telegram 发送失败：{result.get('description', '未知错误')}")
-        return False
-    except Exception as e:
-        print(f"  ❌ Telegram 发送失败：{e}")
-        return False
-
-
-def ask_send_to_telegram(output_file, cfg=None):
-    """脚本结束时询问是否把最终结果文件发送到 Telegram。"""
-    if not output_file:
-        return
-
-    cfg = cfg or load_tg_config()
-    if not cfg.get("enabled"):
-        return
-
-    try:
-        choice = input("\n  是否将最终结果文件发送到 Telegram？(y/n，默认 n): ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        choice = ""
-
-    if choice == "y":
-        telegram_send_file(output_file, cfg)
-    else:
-        print("  已跳过 Telegram 发送。")
-
 
 # ── Step 1: ASN → CIDR ──
 def fetch_prefixes(asns):
@@ -713,17 +653,11 @@ def output_csv(asns):
 
 # ── Main ──
 if __name__ == "__main__":
+    # 首次运行时提示绑定 TG Bot
+    check_or_init_tg_config()
+
     if len(sys.argv) < 2:
-        try:
-            raw = input("  输入 ASN 编号 (多个用逗号分隔): ").strip()
-        except (EOFError, KeyboardInterrupt):
-            try:
-                with open("/dev/tty") as tty:
-                    os.dup2(tty.fileno(), 0)
-                raw = input("  输入 ASN 编号 (多个用逗号分隔): ").strip()
-            except:
-                print(f"\n  请在终端运行: cd {BASE} && python3 run.py\n")
-                sys.exit(0)
+        raw = safe_input("  输入 ASN 编号 (多个用逗号分隔): ")
         if not raw:
             print("用法: python3 run.py AS209242")
             print("  ssh 断线不杀: screen -S scan → python3 run.py AS209242 → Ctrl+A D")
@@ -746,18 +680,12 @@ if __name__ == "__main__":
             print("  ssh 断线不杀: screen -S scan → python3 run.py AS209242 → Ctrl+A D")
             sys.exit(1)
     
-    # 首次运行询问是否绑定 Telegram Bot；不影响原有扫描流程。
-    tg_config = setup_telegram_first_run()
-
-    try:
-        pps_input = input("  设置 masscan 扫描速率 PPS (回车默认 1000): ").strip()
-        if pps_input:
-            if pps_input.isdigit() and int(pps_input) > 0:
-                MASSCAN_RATE = int(pps_input)
-            else:
-                print("  ⚠️ 输入无效，使用默认速率 1000 pps")
-    except (EOFError, KeyboardInterrupt):
-        pass
+    pps_input = safe_input("  设置 masscan 扫描速率 PPS (回车默认 1000): ")
+    if pps_input:
+        if pps_input.isdigit() and int(pps_input) > 0:
+            MASSCAN_RATE = int(pps_input)
+        else:
+            print("  ⚠️ 输入无效，使用默认速率 1000 pps")
 
     print(f"\n  配置: masscan={MASSCAN_RATE}pps, cf-scanner={CF_SCANNER_CONC}c, API={API_CONCURRENT}c(块{API_CHUNK})")
     print(f"  ASN: {', '.join(f'AS{a}' for a in asns)}\n")
@@ -765,10 +693,7 @@ if __name__ == "__main__":
     scan_ports = DEFAULT_PORTS
     if len(sys.argv) < 2:
         print(f"  默认端口: {DEFAULT_PORTS}")
-        try:
-            port_input = input("  回车使用默认，或输入自定义端口 (如 80 或 1-1000 或 80,443,8000-9000): ").strip()
-        except (EOFError, KeyboardInterrupt):
-            port_input = ""
+        port_input = safe_input("  回车使用默认，或输入自定义端口 (如 80 或 1-1000 或 80,443,8000-9000): ")
         if port_input:
             parsed = parse_ports(port_input)
             if parsed:
@@ -788,11 +713,7 @@ if __name__ == "__main__":
         ("4/6 API精筛",   api_verify),
     ]
 
-    choice = ""
-    try:
-        choice = input("\n  是否测速？(y/n，默认跳过): ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        pass
+    choice = safe_input("\n  是否测速？(y/n，默认跳过): ").lower()
     if choice == "y":
         steps.append(("6/6 测速", speed_test))
     else:
@@ -806,10 +727,14 @@ if __name__ == "__main__":
             print(f"  ❌ 任务提前终止: {e}")
             sys.exit(1)
 
-    output_file = output_csv(asns)
+    # 导出结果文件
+    result_csv_path = output_csv(asns)
 
-    # 扫描流程完全结束后，才询问是否发送最终 CSV。
-    ask_send_to_telegram(output_file, tg_config)
+    # 运行结束后提示是否发送至 Telegram (默认不发送，输入 y 发送)
+    if result_csv_path and Path(result_csv_path).exists():
+        tg_send_choice = safe_input("\n  是否发送结果至 Telegram？(y/N，默认不发送): ").lower()
+        if tg_send_choice == "y":
+            send_tg_document(result_csv_path, caption=f"Cloudflare 节点扫描结果: {Path(result_csv_path).name}")
 
     print()
     print("  ───")
