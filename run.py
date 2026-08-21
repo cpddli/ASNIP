@@ -96,10 +96,10 @@ def load_tg_config():
     return {"enabled": False, "token": "", "chat_id": ""}
 
 def check_or_init_tg_config():
-    """首次运行时提示绑定 TG Bot，按回车可跳过"""
+    """是否绑定 TG Bot，按回车可跳过"""
     if not TG_CONFIG_FILE.exists():
         print("  [Telegram Bot 设置]")
-        choice = safe_input("  首次运行，是否绑定 Telegram Bot？(y/N，按回车跳过不绑定): ").lower()
+        choice = safe_input("  是否绑定 Telegram Bot？(y/N，按回车跳过不绑定): ").lower()
         if choice == "y":
             token = safe_input("  请输入 TG Bot Token: ")
             chat_id = safe_input("  请输入 TG Chat ID: ")
